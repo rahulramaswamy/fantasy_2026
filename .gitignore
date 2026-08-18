@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# Project data (never commit bulk data or secrets)
+# Anchored to the repo root so it does not also match src/ff2026/data/
+/data/
+!/data/.gitkeep
+.env
+/configs/league.yaml
+*.parquet
+*.csv
+!tests/fixtures/*.csv
+*.log
