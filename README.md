@@ -80,6 +80,14 @@ is what value-over-replacement and opportunity cost actually need.
 
 Reproduce with `ff model benchmark`. Details in [docs/MODEL.md](docs/MODEL.md).
 
+## In-season
+
+```bash
+ff board ros                    # rest-of-season projections (use these, not preseason)
+ff trade find --league-id <id>  # trades that help you AND your partner
+ff league power --league-id <id># who's actually good vs who's been lucky
+```
+
 ## Commands
 
 ```bash

@@ -179,6 +179,77 @@ Market value is reported *alongside*, never instead. When your lineup value and
 the market disagree, that disagreement is the actual information: a trade the
 market hates and your lineup loves is exactly the one to make.
 
+
+## Rest of season
+
+Preseason projections answer the wrong question once games start: some of those
+points are already banked and can't be traded for, and there is new evidence the
+preseason number never saw. `ff board ros` fixes both.
+
+**Rate** is re-estimated with the preseason projection as the prior and this
+season's games as evidence — the same shrinkage form as the preseason model:
+
+```
+ros_ppg = (points_this_season + k x preseason_ppg) / (games_played + k)
+```
+
+`k = 2` (validated: 2 beat 0, 1, 3, 5 and 8 at every week tested).
+
+**Availability** is modelled separately, and this mattered more than the rate:
+
+```
+availability = (games_played + 2 x 0.9) / (team_games_played + 2)
+ros_games    = team_games_remaining x availability
+```
+
+Validation caught the bug that motivated it — the first version projected players
+who had missed *every* game as though they'd play every remaining one. Missing
+time is the strongest single predictor of missing more.
+
+### Does it work? (2025, rank accuracy vs actual remaining points)
+
+| From week | ROS model | Season-to-date only | Preseason only |
+|---|---|---|---|
+| 3 | **0.714** | 0.714 | 0.536 |
+| 6 | **0.744** | 0.742 | 0.525 |
+| 9 | **0.742** | 0.734 | 0.521 |
+| 12 | **0.746** | 0.729 | 0.543 |
+
+Preseason projections decay badly (0.536 → 0.543 while ROS climbs to 0.746),
+which is precisely why in-season decisions must not use them. **Use `ros_points`
+for every trade, waiver and start/sit call once the season is under way.**
+
+## Finding trades
+
+`ff trade find` searches the league for proposals rather than judging ones you
+already thought of. It rests on one idea: **a trade only happens if both managers
+think they won.**
+
+So a proposal is surfaced only when it improves your starting lineup *and* your
+partner's. Those exist because rosters are unbalanced — you have three startable
+running backs and one receiver, someone has the mirror image, and the surplus is
+worth more to the other team than to its owner.
+
+Two design points worth knowing:
+
+- **Only bench surplus is tradeable.** A player already in your starting lineup
+  can't be given away for free. A roster where everyone starts has no trades in
+  it, and the finder correctly returns nothing.
+- **Lopsided trades are filtered out** (`min_their_gain_ratio`, default 0.25).
+  Gaining 125 while your partner gains 5 is technically mutual and will still be
+  declined. Set the ratio to 0 to see them anyway.
+
+## Power rankings
+
+`ff league power` ranks every team three ways — preseason roster, rest-of-season
+roster, and actual results — because standings measure winning, not quality. The
+gaps are the point:
+
+- **Strong roster, bad record** → unlucky, may be ready to sell. Your best trade
+  partner.
+- **Weak roster, good record** → riding luck, due to regress. A good team to sell
+  to, because they feel like winners.
+
 ## Known limitations
 
 Stated plainly, because a projection you trust blindly is worse than none:
@@ -188,8 +259,11 @@ Stated plainly, because a projection you trust blindly is worse than none:
   offseason context -- depth charts, team changes, coaching -- which it is
   currently blind to.
 - **RB/TE top-12 identification** trails the naive baseline (above). Open item.
-- **No in-season update.** The model projects full seasons. Rest-of-season
-  reprojection with weekly Bayesian updating is the biggest missing feature.
+- **ROS ignores strength of schedule.** Remaining opponents are counted but
+  not weighted by difficulty; Vegas lines are loaded and still unused.
+- **The trade finder assumes opponents value players as I do.** It uses my
+  projections for their lineup too, so it finds trades that are good if they
+  agree with my model. Market value is not yet used as a second opinion.
 - **No strength of schedule.** Vegas lines are loaded but unused.
 - **K and DEF are not projected.** They are close to random and worth roughly
   nothing in draft capital; projecting them properly needs team-level modelling.
@@ -205,7 +279,9 @@ Stated plainly, because a projection you trust blindly is worse than none:
 
 ## Roadmap, in the order I would do it
 
-0. **Close the gap to expert consensus.** The model is blind to offseason
+0. **Strength of schedule in ROS.** Vegas lines are already loaded; weighting
+   remaining games by opponent difficulty is the cheapest remaining accuracy win.
+1. **Close the gap to expert consensus.** The model is blind to offseason
    change. Depth-chart position, team switches and target-competition features
    would attack the largest measured weakness directly.
 
