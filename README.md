@@ -62,6 +62,24 @@ moves — nothing to type while you are on the clock.
 The **Score** column is the recommendation. It answers "which choice leaves me
 best off two picks from now", which is the actual question at a draft pick.
 
+## Accuracy, honestly
+
+Benchmarked against FantasyPros expert consensus (frozen pre-season, 2022-2025):
+
+| Approach | Rank accuracy | Top-12 hit |
+|---|---|---|
+| Expert consensus | **0.714** | **0.594** |
+| Blend (default) | 0.712 | 0.583 |
+| This model alone | 0.654 | 0.510 |
+| Naive baseline | 0.604 | 0.536 |
+
+Expert rankings beat the model's own projections, because the model cannot see
+offseason moves, depth charts or coaching changes. So the board **defers to
+expert consensus for ordering** and uses the model for point magnitudes, which
+is what value-over-replacement and opportunity cost actually need.
+
+Reproduce with `ff model benchmark`. Details in [docs/MODEL.md](docs/MODEL.md).
+
 ## Commands
 
 ```bash

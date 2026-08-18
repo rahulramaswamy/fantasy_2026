@@ -8,6 +8,7 @@ fetch goes through `cached()` with an explicit TTL.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Callable
@@ -58,7 +59,8 @@ def cached(
         _meta_path(path).write_text(
             json.dumps({"name": name, "rows": df.height, "fetched_at": time.time()})
         )
-    except Exception:  # noqa: BLE001 - a cache write failure must not break a draft
+    except OSError:
+        # A cache write failure must not break a draft; the data is already in hand.
         pass
     return df
 
@@ -79,10 +81,9 @@ def cached_json(
         return json.loads(path.read_text())
 
     payload = fetch()
-    try:
+    # A cache write failure must not break a draft; the data is already in hand.
+    with contextlib.suppress(OSError):
         path.write_text(json.dumps(payload))
-    except Exception:  # noqa: BLE001
-        pass
     return payload
 
 
