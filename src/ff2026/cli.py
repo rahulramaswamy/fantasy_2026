@@ -139,36 +139,37 @@ def _ros_board(league_cfg, week: int | None, season: int | None):
 
 
 def _resolve_me(client: SleeperClient, username: str | None) -> tuple[str, str]:
-    """Work out which Sleeper user we are. Returns (user_id, label).
+    """Work out which Sleeper user we are. Returns (numeric user_id, label).
 
-    Precedence is deliberate: an explicit --username always wins over anything
-    stored in .env, because the flag is the more specific instruction. A stored
-    SLEEPER_USER_ID that has gone stale should never silently override it.
+    Every candidate is put through `resolve_user_id`, which passes numeric ids
+    straight through and looks up anything else as a username. That matters
+    because SLEEPER_USER_ID and SLEEPER_USERNAME are trivially easy to mix up,
+    and a username sitting in the id field would otherwise be compared against
+    numeric roster owner ids and silently never match.
+
+    Precedence is deliberate: an explicit --username beats anything stored in
+    .env, because the flag is the more specific instruction.
     """
     settings = get_settings()
+    candidates = [
+        (username, "--username"),
+        (settings.sleeper_user_id, "SLEEPER_USER_ID"),
+        (settings.sleeper_username, "SLEEPER_USERNAME"),
+    ]
 
-    if username:
-        uid = client.resolve_user_id(username)
-        if not uid:
-            console.print(
-                f"[red]Sleeper has no user named '{username}'.[/red]\n"
-                "Usernames are not display names -- check the one you log in with."
-            )
-            raise typer.Exit(1)
-        return uid, username
-
-    if settings.sleeper_user_id:
-        return settings.sleeper_user_id, f"user_id {settings.sleeper_user_id}"
-
-    if settings.sleeper_username:
-        uid = client.resolve_user_id(settings.sleeper_username)
-        if not uid:
-            console.print(
-                f"[red]SLEEPER_USERNAME in .env ('{settings.sleeper_username}') "
-                "is not a Sleeper user.[/red]"
-            )
-            raise typer.Exit(1)
-        return uid, settings.sleeper_username
+    for raw, source in candidates:
+        if not raw:
+            continue
+        raw = str(raw).strip()
+        uid = client.resolve_user_id(raw)
+        if uid:
+            return uid, raw
+        console.print(
+            f"[red]{source} is set to '{raw}', which Sleeper does not "
+            f"recognise as a user.[/red]\n"
+            "Use the username you log in with (not your team's display name)."
+        )
+        raise typer.Exit(1)
 
     console.print(
         "[red]I don't know who you are.[/red] Set SLEEPER_USERNAME in .env, "
