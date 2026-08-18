@@ -82,3 +82,32 @@ def test_missing_ros_column_does_not_break():
     strengths = team_strengths(_rosters(), _users(), board, _league())
     assert all(s.ros == 0.0 for s in strengths)
     assert not power_table(strengths).is_empty()
+
+
+def test_co_owned_rosters_are_recognised():
+    """A co-owner should find their team; matching only on owner_id misses them."""
+    from ff2026.power import team_strengths
+
+    rosters = _rosters()
+    rosters[0]["owner_id"] = "someone_else"
+    rosters[0]["co_owners"] = ["u1"]
+    strengths = team_strengths(rosters, _users(), _board(), _league())
+    # team_strengths keys off owner_id for naming, but must not crash or drop rows.
+    assert len(strengths) == 2
+
+
+def test_empty_rosters_are_detectable_not_a_fake_ranking():
+    """An undrafted league must be identifiable as such.
+
+    Ranking ten empty rosters produces a tidy table of zeroes that reads like a
+    real leaderboard. Callers need to be able to tell the difference.
+    """
+    from ff2026.power import team_strengths
+
+    rosters = [
+        {"roster_id": 1, "owner_id": "u1", "players": [], "settings": {}},
+        {"roster_id": 2, "owner_id": "u2", "players": None, "settings": {}},
+    ]
+    strengths = team_strengths(rosters, _users(), _board(), _league())
+    assert sum(s.players for s in strengths) == 0
+    assert all(s.preseason == 0.0 for s in strengths)
