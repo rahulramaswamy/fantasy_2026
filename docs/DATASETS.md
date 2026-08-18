@@ -238,3 +238,23 @@ only partially covers via FTN and PFR.
 ```bash
 ff data sync    # warms every cache so draft night needs no network
 ```
+
+
+## FantasyPros expert consensus (ECR)
+
+**Source:** `dynastyprocess/data` (mirrors FantasyPros), via `nflreadpy.load_ff_rankings()`
+**Cost:** free · **Auth:** none
+
+| File | What it is |
+|---|---|
+| `db_fpecr_latest` | Current rankings — used to build this season's board |
+| `db_fpecr` | Historical archive with `scrape_date` — used to backtest without hindsight |
+| `db_playerids` | `fantasypros_id` ↔ `gsis_id` ↔ `sleeper_id` crosswalk |
+
+The page determines the format, **not** the `ecr_type` column — a trap worth
+knowing: `ppr-cheatsheets` carries `ecr_type='ro'`, not `'rp'`. Filter on
+`fp_page`.
+
+This is the single most accurate ranking input available for free, and it beats
+this project's own projections (see [MODEL.md](MODEL.md)). Offline use: clone
+`dynastyprocess/data` and set `FF_DP_LOCAL_DIR` to its `files/` directory.

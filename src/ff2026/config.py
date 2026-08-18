@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     sleeper_league_id: str | None = None
     sleeper_draft_id: str | None = None
     ff_data_dir: Path = Path("./data")
+    # Optional local checkout of dynastyprocess/data, for offline expert rankings.
+    ff_dp_local_dir: str | None = None
 
     @property
     def cache_dir(self) -> Path:

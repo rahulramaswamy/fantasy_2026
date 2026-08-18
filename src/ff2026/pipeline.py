@@ -7,15 +7,19 @@ projections and VORP, just without ADP-based survival probabilities.
 
 from __future__ import annotations
 
+import warnings
+
 import polars as pl
 
 from .config import LeagueConfig, get_settings
+from .data import expert as expert_mod
 from .data import market as market_mod
 from .data import nflverse
 from .data.cache import TTL_HOUR, cached
 from .data.sleeper import SleeperClient
 from .draft.value import add_value
 from .ids import build_crosswalk, join_key, sleeper_players_to_frame
+from .model.blend import DEFAULT_EXPERT_WEIGHT, blend_rankings
 from .model.features import attach_age, attach_expected_points, season_totals
 from .model.projections import (
     ProjectionConfig,
@@ -116,9 +120,15 @@ def build_board(
     lookback: int = 4,
     config: ProjectionConfig | None = None,
     with_market: bool = True,
+    expert_weight: float = DEFAULT_EXPERT_WEIGHT,
     force: bool = False,
 ) -> pl.DataFrame:
-    """Projections + uncertainty + VORP + market price, keyed by Sleeper id."""
+    """Projections + uncertainty + VORP + market price, keyed by Sleeper id.
+
+    `expert_weight` controls how much the board's ordering defers to FantasyPros
+    expert consensus, which benchmarks better than the model alone. Set 0.0 for
+    a pure-model board.
+    """
     season = season or league.season
     config = config or ProjectionConfig(lookback=lookback)
 
@@ -128,6 +138,27 @@ def build_board(
     projections = project_season(totals, universe, season, config)
     calibration = calibrate_uncertainty(totals, season, config)
     projections = attach_uncertainty(projections, calibration, config)
+
+    # Expert consensus orders players better than the model does (see
+    # `ff model benchmark`), so defer to it for ordering while keeping the
+    # model's point magnitudes, which VORP and opportunity cost need.
+    if expert_weight > 0:
+        try:
+            ecr = expert_mod.current_ecr(
+                page=expert_mod.draft_page_for(league.ppr, league.superflex)
+            )
+            projections = blend_rankings(projections, ecr, weight=expert_weight)
+        except Exception as exc:  # noqa: BLE001 - never block a board build on a feed
+            # Warn loudly rather than silently shipping a pure-model board: the
+            # expert blend is the single biggest accuracy input, and a board that
+            # quietly lost it looks identical to one that never asked for it.
+            warnings.warn(
+                f"Expert rankings unavailable ({type(exc).__name__}: {exc}); "
+                "board is model-only and will rank worse. "
+                "Check network access or set FF_DP_LOCAL_DIR.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     # Attach Sleeper ids so the board can talk to the draft feed.
     try:

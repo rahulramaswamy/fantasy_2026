@@ -22,6 +22,8 @@ from .data.sleeper import SleeperClient
 from .draft.agent import AgentConfig, explain, recommend
 from .draft.board import DraftState, picks_frame, roster_counts
 from .draft.value import tier_breaks
+from .model.benchmark import benchmark
+from .model.benchmark import summarize as bench_summarize
 from .model.evaluate import backtest, coverage, summarize
 from .model.projections import ProjectionConfig, fit_age_curve
 from .scoring import ScoringEngine
@@ -238,6 +240,10 @@ def board_build(
     season: int | None = typer.Option(None),
     lookback: int = typer.Option(4),
     no_market: bool = typer.Option(False, "--no-market", help="Skip ADP/trade-value feeds."),
+    expert_weight: float = typer.Option(
+        0.75, "--expert-weight",
+        help="How much the board defers to expert consensus (0 = pure model).",
+    ),
     force: bool = typer.Option(False, "--force", help="Bypass caches."),
     config: str | None = typer.Option(None, "--config"),
 ) -> None:
@@ -245,7 +251,8 @@ def board_build(
     cfg = _load_league(config)
     with console.status("Building projections..."):
         board = pipeline.build_board(
-            cfg, season=season, lookback=lookback, with_market=not no_market, force=force
+            cfg, season=season, lookback=lookback, with_market=not no_market,
+            expert_weight=expert_weight, force=force,
         )
     path = pipeline.save_board(board)
     console.print(f"[green]Saved {board.height:,} players to {path}[/green]")
@@ -299,6 +306,46 @@ def model_backtest(
     console.print("\n[dim]Coverage (players the model can rank vs the baseline):[/dim]")
     for season in season_list:
         console.print(f"  {coverage(totals, season)}")
+
+
+@model_app.command("benchmark")
+def model_benchmark(
+    seasons: str = typer.Option("2022,2023,2024,2025", help="Comma-separated seasons."),
+    lookback: int = typer.Option(4),
+    local_dir: str | None = typer.Option(
+        None, "--local-dir", help="Path to a dynastyprocess/data checkout (offline use)."
+    ),
+    config: str | None = typer.Option(None, "--config"),
+) -> None:
+    """Compare this model against expert consensus and a naive baseline.
+
+    This is the honest test: the real alternative to the model is a free expert
+    ranking, not a strawman. Rank metrics only -- expert consensus has no points.
+    """
+    cfg = _load_league(config)
+    season_list = [int(s) for s in seasons.split(",") if s.strip()]
+
+    with console.status("Loading history and expert rankings..."):
+        totals = pipeline.build_totals(
+            cfg, max(season_list) + 1, lookback=lookback + len(season_list)
+        )
+        results = benchmark(
+            totals, season_list, ProjectionConfig(lookback=lookback), local_dir=local_dir
+        )
+
+    if results.is_empty():
+        console.print(
+            "[red]No benchmark results -- expert rankings unavailable for those seasons.[/red]"
+        )
+        raise typer.Exit(1)
+
+    console.print(bench_summarize(results, by_position=True))
+    console.print("\n[bold]Pooled across positions:[/bold]")
+    console.print(bench_summarize(results, by_position=False))
+    console.print(
+        "\n[dim]spearman = rank accuracy across the field; "
+        "top12 = share of the true top 12 identified.[/dim]"
+    )
 
 
 @model_app.command("age-curve")

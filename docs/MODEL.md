@@ -76,6 +76,52 @@ Reproduce any of this:
 ff model backtest --seasons 2022,2023,2024,2025
 ```
 
+
+## Benchmarked against expert consensus
+
+Beating a naive baseline proves the machinery works. It does not prove the model
+is worth using, because the real alternative is a free expert ranking. So the
+model is also scored against **FantasyPros expert consensus (ECR)**, frozen at
+the last August scrape before each season so no hindsight leaks in.
+
+`ff model benchmark`, 2022-2025, identical player sets, rank metrics only (expert
+consensus is a rank -- it has no points, so MAE/RMSE are undefined for it):
+
+| Approach | Spearman | Top-12 hit |
+|---|---|---|
+| **Expert consensus (ECR)** | **0.714** | **0.594** |
+| Blend, 75% expert | 0.712 | 0.583 |
+| Blend, 50% expert | 0.702 | 0.578 |
+| This model alone | 0.654 | 0.510 |
+| Naive baseline | 0.604 | 0.536 |
+
+**Expert consensus wins at every position.** This is not a surprise and it is not
+a bug: the model is purely backward-looking. It sees a player's own statistics,
+age and draft capital. It cannot see that he changed teams, that his team drafted
+a replacement, that the coaching staff turned over, or that he is holding out. In
+August that information is worth more than any amount of curve-fitting.
+
+### What follows from that
+
+The projection layer is **not** where this project adds value, and pretending
+otherwise would be dishonest. The value is in the decision layer, which no
+ranking list can provide:
+
+1. **Your exact scoring**, applied to every historical week.
+2. **Your exact roster rules**, which set replacement level.
+3. **Your draft position, live** -- what survives to your next pick.
+
+So the board defers to expert consensus for *ordering* and uses the model for
+*magnitude*. `blend_rankings()` reassigns the model's positional point
+distribution along the blended order: if the blend makes someone the 5th-best
+receiver, he inherits the points the model gave the 5th-best receiver. VORP,
+tier breaks and opportunity cost keep working, on a better ordering.
+
+Default `--expert-weight 0.75`. Pure expert edges it on the pooled numbers, but
+0.75 is at or above optimal for RB and TE, within noise elsewhere, and keeps the
+model's coverage of the ~500 players the experts never rank. Set `0.0` for a
+pure-model board.
+
 ## Two data quirks that will bite you
 
 Both were found while validating the scoring engine against real 2025 data:
@@ -137,6 +183,10 @@ market hates and your lineup loves is exactly the one to make.
 
 Stated plainly, because a projection you trust blindly is worse than none:
 
+- **The projection layer loses to free expert rankings** (see benchmark above).
+  Mitigated by blending, not solved. Closing that gap means feeding the model
+  offseason context -- depth charts, team changes, coaching -- which it is
+  currently blind to.
 - **RB/TE top-12 identification** trails the naive baseline (above). Open item.
 - **No in-season update.** The model projects full seasons. Rest-of-season
   reprojection with weekly Bayesian updating is the biggest missing feature.
@@ -154,6 +204,10 @@ Stated plainly, because a projection you trust blindly is worse than none:
   understates the tail.
 
 ## Roadmap, in the order I would do it
+
+0. **Close the gap to expert consensus.** The model is blind to offseason
+   change. Depth-chart position, team switches and target-competition features
+   would attack the largest measured weakness directly.
 
 1. **Fix top-of-position compression at RB/TE** — likely a tier-aware shrinkage
    that trusts large samples more at the top of the distribution.
