@@ -9,6 +9,7 @@ while you are on the clock.
 from __future__ import annotations
 
 import time
+import warnings
 
 import polars as pl
 import typer
@@ -116,27 +117,111 @@ def _current_week(default: int | None = None) -> int:
 
 
 def _ros_board(league_cfg, week: int | None, season: int | None):
-    """Load the board with rest-of-season projections attached."""
+    """Load the board with rest-of-season projections attached.
+
+    Before week 1 there are no stats to fold in, which is normal rather than a
+    problem, so the underlying warning is turned into a plain note.
+    """
     wk = _current_week(week)
-    board = pipeline.build_ros_board(league_cfg, wk, season=season)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        board = pipeline.build_ros_board(league_cfg, wk, season=season)
+    for warning in caught:
+        message = str(warning.message)
+        if "not yet started" in message:
+            console.print(
+                "[dim]Season hasn't started -- rest-of-season equals the "
+                "preseason projection until week 1 games are played.[/dim]"
+            )
+        else:
+            console.print(f"[yellow]{message}[/yellow]")
     return board, wk
 
 
-def _my_roster_ids(league_id: str, username: str | None) -> tuple[list[str], list, list]:
+def _resolve_me(client: SleeperClient, username: str | None) -> tuple[str, str]:
+    """Work out which Sleeper user we are. Returns (user_id, label).
+
+    Precedence is deliberate: an explicit --username always wins over anything
+    stored in .env, because the flag is the more specific instruction. A stored
+    SLEEPER_USER_ID that has gone stale should never silently override it.
+    """
     settings = get_settings()
+
+    if username:
+        uid = client.resolve_user_id(username)
+        if not uid:
+            console.print(
+                f"[red]Sleeper has no user named '{username}'.[/red]\n"
+                "Usernames are not display names -- check the one you log in with."
+            )
+            raise typer.Exit(1)
+        return uid, username
+
+    if settings.sleeper_user_id:
+        return settings.sleeper_user_id, f"user_id {settings.sleeper_user_id}"
+
+    if settings.sleeper_username:
+        uid = client.resolve_user_id(settings.sleeper_username)
+        if not uid:
+            console.print(
+                f"[red]SLEEPER_USERNAME in .env ('{settings.sleeper_username}') "
+                "is not a Sleeper user.[/red]"
+            )
+            raise typer.Exit(1)
+        return uid, settings.sleeper_username
+
+    console.print(
+        "[red]I don't know who you are.[/red] Set SLEEPER_USERNAME in .env, "
+        "or pass --username."
+    )
+    raise typer.Exit(1)
+
+
+def _my_roster_ids(league_id: str, username: str | None) -> tuple[list[str], list, list]:
+    """Find my roster in a league, with diagnostics when it isn't there.
+
+    Failing to find a roster has three quite different causes -- wrong user,
+    wrong league, or a league you are genuinely not in -- and they need
+    different fixes, so the error says which one it is.
+    """
     with SleeperClient() as client:
-        uid = settings.sleeper_user_id or (
-            client.resolve_user_id(username or settings.sleeper_username or "")
-            if (username or settings.sleeper_username) else None
-        )
+        uid, label = _resolve_me(client, username)
+        league = client.league(league_id)
         rosters = client.league_rosters(league_id)
         users = client.league_users(league_id)
-    mine = next((r for r in rosters if str(r.get("owner_id")) == str(uid)), None)
-    if not mine:
-        console.print("[red]Could not find your roster in that league. "
-                      "Check --username / SLEEPER_USER_ID.[/red]")
+
+    if not league:
+        console.print(
+            f"[red]No Sleeper league with id {league_id}.[/red]\n"
+            "Check SLEEPER_LEAGUE_ID in .env, or run "
+            "`ff league sync --username <you>` to pick the right one."
+        )
         raise typer.Exit(1)
-    return [str(p) for p in (mine.get("players") or [])], rosters, users
+
+    def _owns(roster: dict) -> bool:
+        if str(roster.get("owner_id")) == str(uid):
+            return True
+        # Co-owned teams list additional managers separately.
+        return str(uid) in {str(c) for c in (roster.get("co_owners") or [])}
+
+    mine = next((r for r in rosters if _owns(r)), None)
+    if mine:
+        return [str(p) for p in (mine.get("players") or [])], rosters, users
+
+    league_name = league.get("name", "?")
+    season = league.get("season", "?")
+    managers = sorted(
+        (u.get("display_name") or u.get("user_id") or "?") for u in users
+    )
+    console.print(
+        f"[red]{label} is not in '{league_name}' ({season}).[/red]\n"
+        f"Resolved user_id: {uid}\n"
+        f"Managers in that league: {', '.join(managers) or '(none)'}\n\n"
+        "Most likely SLEEPER_LEAGUE_ID points at a different (or older) league. "
+        "Run [bold]ff league sync --username <you>[/bold] to list your leagues "
+        "and write the right id."
+    )
+    raise typer.Exit(1)
 
 
 # --------------------------------------------------------------------- league
@@ -421,10 +506,10 @@ def _resolve_draft(client: SleeperClient, draft_id: str | None,
     """Return (draft_id, user_id), prompting if necessary."""
     settings = get_settings()
     draft_id = draft_id or settings.sleeper_draft_id
-    username = username or settings.sleeper_username
-    user_id = settings.sleeper_user_id or (
-        client.resolve_user_id(username) if username else None
-    )
+    try:
+        user_id, _ = _resolve_me(client, username)
+    except typer.Exit:
+        user_id = None
 
     if draft_id:
         return draft_id, user_id
@@ -435,7 +520,25 @@ def _resolve_draft(client: SleeperClient, draft_id: str | None,
 
     drafts = client.user_drafts(user_id, season)
     if not drafts:
-        console.print(f"[red]No {season} drafts found for that user.[/red]")
+        # A draft belongs to a league as well as to its members, and the
+        # per-user feed can come back empty (for instance before a draft is
+        # scheduled, or for a league joined after creation). The league's own
+        # draft list is the more reliable route when we know the league.
+        settings = get_settings()
+        if settings.sleeper_league_id:
+            drafts = client.league_drafts(settings.sleeper_league_id)
+    if not drafts:
+        console.print(
+            f"[red]No {season} drafts found.[/red]\n"
+            "Checked your user's drafts"
+            + (
+                f" and league {settings.sleeper_league_id}."
+                if get_settings().sleeper_league_id
+                else " (set SLEEPER_LEAGUE_ID in .env to also check your league)."
+            )
+            + "\nIf the draft isn't scheduled in Sleeper yet, there is nothing "
+            "to connect to. Pass --draft-id once it exists."
+        )
         raise typer.Exit(1)
     if len(drafts) == 1:
         return drafts[0]["draft_id"], user_id
@@ -647,20 +750,9 @@ def trade_eval(
     if roster:
         my_ids = _resolve(roster)
     else:
-        settings = get_settings()
-        lid = league_id or settings.sleeper_league_id
-        uname = username or settings.sleeper_username
-        if not lid:
-            console.print("[red]Pass --roster, or --league-id to pull your roster.[/red]")
-            raise typer.Exit(1)
-        with SleeperClient() as client:
-            uid = settings.sleeper_user_id or (client.resolve_user_id(uname) if uname else None)
-            rosters = client.league_rosters(lid)
-        mine = next((r for r in rosters if str(r.get("owner_id")) == str(uid)), None)
-        if not mine:
-            console.print("[red]Could not find your roster in that league.[/red]")
-            raise typer.Exit(1)
-        my_ids = [str(p) for p in (mine.get("players") or [])]
+        # Let _resolve_me handle the .env fallback so precedence is uniform.
+        lid = _resolve_league_id(league_id)
+        my_ids, _, _ = _my_roster_ids(lid, username)
 
     id_col = "sleeper_id" if "sleeper_id" in board.columns else "gsis_id"
     my_roster = board.filter(pl.col(id_col).is_in(my_ids))
@@ -852,6 +944,26 @@ def league_power(
     if df.is_empty():
         console.print("[red]No rosters found for that league.[/red]")
         raise typer.Exit(1)
+
+    # An undrafted league has empty rosters, which would otherwise render as a
+    # tidy table of zeroes -- a ranking that ranks nothing. Say so instead.
+    rostered = sum(s.players for s in strengths)
+    if rostered == 0:
+        console.print(
+            "[yellow]Every roster in this league is empty -- the draft "
+            "hasn't happened yet.[/yellow]\n"
+            "Power rankings compare drafted teams, so there is nothing to "
+            "compare until picks are in.\n"
+            "Until then, use [bold]ff board show[/bold] for player values and "
+            "[bold]ff draft live[/bold] on draft day."
+        )
+        raise typer.Exit(0)
+    if any(s.players == 0 for s in strengths):
+        empty = [s.manager for s in strengths if s.players == 0]
+        console.print(
+            f"[yellow]Note: {len(empty)} roster(s) are empty and will rank "
+            f"last: {', '.join(empty)}[/yellow]"
+        )
 
     table = Table(title=f"Power rankings (week {wk})", header_style="bold")
     for col in ("ROS", "Manager", "Record", "Pre", "ROS pts", "Scored", "Luck", "Trend"):
