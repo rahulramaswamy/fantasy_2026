@@ -27,6 +27,7 @@ from .model.projections import (
     calibrate_uncertainty,
     project_season,
 )
+from .model.ros import ROSConfig, rest_of_season
 from .scoring import ScoringEngine
 
 
@@ -223,3 +224,32 @@ def load_board(name: str = "board") -> pl.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"No saved board at {path}. Run `ff board build` first.")
     return pl.read_parquet(path)
+
+
+def build_ros_board(
+    league: LeagueConfig,
+    current_week: int,
+    season: int | None = None,
+    board: pl.DataFrame | None = None,
+    config: ROSConfig | None = None,
+) -> pl.DataFrame:
+    """Attach rest-of-season projections to a saved (or supplied) board.
+
+    Every in-season decision -- trades, waivers, start/sit -- should run off
+    `ros_points` rather than `proj_points`, because points already scored cannot
+    be traded for.
+    """
+    season = season or league.season
+    board = board if board is not None else load_board()
+    engine = ScoringEngine(league)
+    weekly = nflverse.weekly_stats([season])
+    schedule = nflverse.schedules([season])
+    return rest_of_season(
+        board, weekly, schedule, engine, current_week, season, config or ROSConfig()
+    )
+
+
+def league_rosters(league_id: str) -> tuple[list, list]:
+    """Fetch (rosters, users) for a league in one call."""
+    with SleeperClient() as client:
+        return client.league_rosters(league_id), client.league_users(league_id)

@@ -26,8 +26,10 @@ from .model.benchmark import benchmark
 from .model.benchmark import summarize as bench_summarize
 from .model.evaluate import backtest, coverage, summarize
 from .model.projections import ProjectionConfig, fit_age_curve
+from .power import power_table, read_the_table, team_strengths
 from .scoring import ScoringEngine
 from .trades.evaluate import evaluate_trade
+from .trades.finder import FinderConfig, find_trades
 
 app = typer.Typer(
     help="Fantasy football model, draft agent and trade evaluator.", no_args_is_help=True
@@ -92,6 +94,49 @@ def _load_league(path: str | None) -> LeagueConfig:
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+
+
+
+
+def _resolve_league_id(league_id: str | None) -> str:
+    settings = get_settings()
+    lid = league_id or settings.sleeper_league_id
+    if not lid:
+        console.print("[red]Pass --league-id or set SLEEPER_LEAGUE_ID in .env[/red]")
+        raise typer.Exit(1)
+    return lid
+
+
+def _current_week(default: int | None = None) -> int:
+    if default is not None:
+        return default
+    with SleeperClient() as client:
+        state = client.state()
+    return int(state.get("week") or 1)
+
+
+def _ros_board(league_cfg, week: int | None, season: int | None):
+    """Load the board with rest-of-season projections attached."""
+    wk = _current_week(week)
+    board = pipeline.build_ros_board(league_cfg, wk, season=season)
+    return board, wk
+
+
+def _my_roster_ids(league_id: str, username: str | None) -> tuple[list[str], list, list]:
+    settings = get_settings()
+    with SleeperClient() as client:
+        uid = settings.sleeper_user_id or (
+            client.resolve_user_id(username or settings.sleeper_username or "")
+            if (username or settings.sleeper_username) else None
+        )
+        rosters = client.league_rosters(league_id)
+        users = client.league_users(league_id)
+    mine = next((r for r in rosters if str(r.get("owner_id")) == str(uid)), None)
+    if not mine:
+        console.print("[red]Could not find your roster in that league. "
+                      "Check --username / SLEEPER_USER_ID.[/red]")
+        raise typer.Exit(1)
+    return [str(p) for p in (mine.get("players") or [])], rosters, users
 
 
 # --------------------------------------------------------------------- league
@@ -682,6 +727,155 @@ def sleeper_drafts(
         table.add_row(d.get("draft_id", "?"), d.get("status", "?"), d.get("type", "?"),
                       str(s.get("teams", "?")), str(s.get("rounds", "?")))
     console.print(table)
+
+
+@trade_app.command("find")
+def trade_find(
+    league_id: str | None = typer.Option(None, "--league-id"),
+    username: str | None = typer.Option(None, "--username"),
+    week: int | None = typer.Option(None, "--week", help="Defaults to the current NFL week."),
+    season: int | None = typer.Option(None, "--season"),
+    max_send: int = typer.Option(2, "--max-send"),
+    max_receive: int = typer.Option(2, "--max-receive"),
+    min_gain: float = typer.Option(5.0, "--min-gain", help="Minimum ROS points I must gain."),
+    top_n: int = typer.Option(15, "--top"),
+    config: str | None = typer.Option(None, "--config"),
+) -> None:
+    """Search the league for trades that help you AND your trade partner.
+
+    A trade only happens if both managers think they won, so this only surfaces
+    proposals that improve both starting lineups. Valued on rest-of-season points.
+    """
+    cfg = _load_league(config)
+    lid = _resolve_league_id(league_id)
+
+    with console.status("Projecting rest of season..."):
+        board, wk = _ros_board(cfg, week, season)
+    my_ids, rosters, users = _my_roster_ids(lid, username)
+
+    id_col = "sleeper_id" if "sleeper_id" in board.columns else "gsis_id"
+    my_roster = board.filter(pl.col(id_col).is_in(my_ids))
+
+    by_user = {u.get("user_id"): u for u in users}
+    opponents = {}
+    for roster in rosters:
+        ids = [str(p) for p in (roster.get("players") or [])]
+        if set(ids) == set(my_ids) or not ids:
+            continue
+        user = by_user.get(roster.get("owner_id")) or {}
+        name = user.get("display_name") or f"roster {roster.get('roster_id')}"
+        opponents[name] = board.filter(pl.col(id_col).is_in(ids))
+
+    with console.status(f"Searching {len(opponents)} opponents..."):
+        ideas = find_trades(
+            my_roster, opponents, board, cfg,
+            FinderConfig(max_send=max_send, max_receive=max_receive,
+                         min_my_gain=min_gain, top_n=top_n),
+        )
+
+    if not ideas:
+        console.print(
+            f"[yellow]No mutually beneficial trades found at week {wk} "
+            f"(min gain {min_gain}). Try --min-gain 2 or --max-send 3.[/yellow]"
+        )
+        return
+
+    table = Table(title=f"Trade ideas (week {wk}, rest-of-season points)", header_style="bold")
+    for col in ("#", "Partner", "You send", "You get", "You gain", "They gain", "Spots"):
+        numeric = col in ("#", "You gain", "They gain", "Spots")
+        table.add_column(col, justify="right" if numeric else "left")
+    for i, idea in enumerate(ideas, 1):
+        table.add_row(
+            str(i), idea.partner, ", ".join(idea.send_names), ", ".join(idea.receive_names),
+            f"[green]+{idea.my_gain:.0f}[/]", f"+{idea.their_gain:.0f}",
+            f"{idea.depth_delta:+d}" if idea.depth_delta else "0",
+        )
+    console.print(table)
+    console.print(
+        "[dim]Both columns are positive by construction -- these are trades the "
+        "other manager has a reason to accept, not steals.[/dim]"
+    )
+
+
+@board_app.command("ros")
+def board_ros(
+    week: int | None = typer.Option(None, "--week"),
+    season: int | None = typer.Option(None, "--season"),
+    position: str | None = typer.Option(None, "--pos"),
+    limit: int = typer.Option(30),
+    config: str | None = typer.Option(None, "--config"),
+) -> None:
+    """Rest-of-season projections -- the number to use once the season starts."""
+    cfg = _load_league(config)
+    with console.status("Projecting rest of season..."):
+        board, wk = _ros_board(cfg, week, season)
+    if position:
+        board = board.filter(pl.col("position") == position.upper())
+
+    table = Table(title=f"Rest of season, from week {wk}", header_style="bold")
+    for col in ("#", "Player", "Pos", "Tm", "ROS pts", "ROS ppg", "Gm left", "GP", "Avail"):
+        table.add_column(col, justify="left" if col in ("Player", "Pos", "Tm") else "right")
+    for i, row in enumerate(board.head(limit).iter_rows(named=True), 1):
+        pos = row.get("position") or "?"
+        avail = row.get("availability")
+        table.add_row(
+            str(i), str(row.get("name") or "?"),
+            f"[{POS_COLORS.get(pos, 'white')}]{pos}[/]", str(row.get("team") or "-"),
+            _fmt(row.get("ros_points"), 0), _fmt(row.get("ros_ppg"), 1),
+            _fmt(row.get("ros_games"), 1), _fmt(row.get("games_played"), 0),
+            f"{avail:.0%}" if avail is not None else "-",
+        )
+    console.print(table)
+
+
+@league_app.command("power")
+def league_power(
+    league_id: str | None = typer.Option(None, "--league-id"),
+    week: int | None = typer.Option(None, "--week"),
+    season: int | None = typer.Option(None, "--season"),
+    config: str | None = typer.Option(None, "--config"),
+) -> None:
+    """Rank every team by preseason roster, rest-of-season roster, and results.
+
+    The gaps matter more than the ranks: a strong roster with a bad record is
+    unlucky and ready to sell; a weak roster with a good record is due to regress.
+    """
+    cfg = _load_league(config)
+    lid = _resolve_league_id(league_id)
+
+    with console.status("Projecting rest of season..."):
+        board, wk = _ros_board(cfg, week, season)
+    rosters, users = pipeline.league_rosters(lid)
+
+    strengths = team_strengths(rosters, users, board, cfg)
+    df = power_table(strengths)
+    if df.is_empty():
+        console.print("[red]No rosters found for that league.[/red]")
+        raise typer.Exit(1)
+
+    table = Table(title=f"Power rankings (week {wk})", header_style="bold")
+    for col in ("ROS", "Manager", "Record", "Pre", "ROS pts", "Scored", "Luck", "Trend"):
+        table.add_column(col, justify="left" if col == "Manager" else "right")
+    for row in df.iter_rows(named=True):
+        luck, trend = row["luck"], row["trend"]
+        luck_s = f"[green]+{luck}[/]" if luck > 0 else (f"[red]{luck}[/]" if luck < 0 else "0")
+        trend_s = f"[green]+{trend}[/]" if trend > 0 else (f"[red]{trend}[/]" if trend < 0 else "0")
+        table.add_row(
+            str(row["rank_ros"]), row["manager"], row["record"],
+            f"#{row['rank_pre']}", _fmt(row["ros"], 0), f"#{row['rank_actual']}",
+            luck_s, trend_s,
+        )
+    console.print(table)
+    console.print(
+        "[dim]Luck = record rank vs scoring rank. "
+        "Trend = preseason rank vs ROS rank.[/dim]"
+    )
+
+    notes = read_the_table(df)
+    if notes:
+        console.print("\n[bold]What this means:[/bold]")
+        for note in notes:
+            console.print(f"  - {note}")
 
 
 @app.command("version")
