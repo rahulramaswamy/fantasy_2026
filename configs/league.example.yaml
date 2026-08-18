@@ -1,0 +1,45 @@
+# Example league config. Copy to configs/league.yaml, or generate the real one
+# straight from Sleeper with:  ff league sync --username <you>
+name: Example 12-team PPR
+league_id: null
+season: 2026
+teams: 12
+
+# Sleeper's roster_positions array, in order. BN = bench, IR = injured reserve.
+roster_positions:
+  - QB
+  - RB
+  - RB
+  - WR
+  - WR
+  - TE
+  - FLEX
+  - K
+  - DEF
+  - BN
+  - BN
+  - BN
+  - BN
+  - BN
+  - BN
+
+# Sleeper's scoring_settings map. These are Sleeper's own key names, so a synced
+# league drops in unchanged. Note Sleeper's default interception value is -1,
+# unlike the NFL-standard -2 that nflverse's built-in points column assumes.
+scoring_settings:
+  pass_yd: 0.04
+  pass_td: 4.0
+  pass_int: -1.0
+  pass_2pt: 2.0
+  rush_yd: 0.1
+  rush_td: 6.0
+  rush_2pt: 2.0
+  rec: 1.0
+  rec_yd: 0.1
+  rec_td: 6.0
+  rec_2pt: 2.0
+  fum_lost: -2.0
+  st_td: 6.0
+
+ppr: 1.0
+superflex: false
