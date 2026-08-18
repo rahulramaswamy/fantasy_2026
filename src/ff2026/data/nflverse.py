@@ -8,6 +8,8 @@ and to keep loader names in one place.
 
 from __future__ import annotations
 
+import warnings
+
 import polars as pl
 
 # nflreadpy is imported lazily inside functions so that importing this module
@@ -31,6 +33,30 @@ def weekly_stats(seasons: list[int]) -> pl.DataFrame:
     """Per-player, per-week box score stats (the model's dependent variable)."""
     df = _nfl().load_player_stats(seasons=seasons, summary_level="week")
     return df.filter(pl.col("season_type") == "REG")
+
+
+def weekly_stats_if_available(seasons: list[int]) -> pl.DataFrame:
+    """Weekly stats, or an empty frame if nflverse has no file for that season.
+
+    Before week 1 the current season's stats release does not exist yet, and a
+    404 there is expected rather than exceptional -- rest-of-season projections
+    must still work in the preseason, they just have no new evidence to fold in.
+    """
+    try:
+        return weekly_stats(seasons)
+    except Exception as exc:  # noqa: BLE001 - any transport error means "no data yet"
+        warnings.warn(
+            f"No weekly stats for {seasons} ({type(exc).__name__}); "
+            "treating the season as not yet started.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return pl.DataFrame(
+            schema={
+                "player_id": pl.Utf8, "season": pl.Int32, "week": pl.Int32,
+                "season_type": pl.Utf8, "team": pl.Utf8, "position": pl.Utf8,
+            }
+        )
 
 
 def player_master() -> pl.DataFrame:

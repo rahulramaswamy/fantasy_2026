@@ -45,9 +45,14 @@ class ROSConfig:
     prior_games: float = 2.0
     # Availability prior. A player who has missed games is likelier to keep
     # missing them -- absence is evidence, not noise. `avail_prior_games` is how
-    # many games of benefit-of-the-doubt to extend, at `avail_prior_rate`.
+    # many games of benefit-of-the-doubt to extend before observed availability
+    # takes over. The prior *rate* is the player's own preseason durability
+    # (proj_games / games_per_team) where known, so that with zero games played
+    # the rest-of-season projection reduces exactly to the preseason one.
     avail_prior_games: float = 2.0
     avail_prior_rate: float = 0.9
+    # Games each team plays in a full regular season.
+    games_per_team: int = 17
     # Multiplier applied to players carrying an out-for-now designation.
     injury_discount: float = 0.35
     # Regular season length, used when a schedule is unavailable.
@@ -165,15 +170,24 @@ def rest_of_season(
     # Without this, a player who has missed every game so far is projected as if
     # he will play every remaining one -- which validation showed is badly wrong,
     # because missing time is the single strongest predictor of missing more.
-    ka, rate = config.avail_prior_games, config.avail_prior_rate
-    df = df.with_columns(
+    ka = config.avail_prior_games
+    if "proj_games" in df.columns:
+        prior_rate = (
+            (pl.col("proj_games") / config.games_per_team)
+            .clip(0.0, 1.0)
+            .fill_null(config.avail_prior_rate)
+        )
+    else:
+        prior_rate = pl.lit(config.avail_prior_rate)
+
+    df = df.with_columns(prior_rate.alias("_avail_prior")).with_columns(
         (
-            (pl.col("games_played") + ka * rate)
+            (pl.col("games_played") + ka * pl.col("_avail_prior"))
             / (pl.col("team_games_played") + ka)
         ).clip(0.0, 1.0).alias("availability")
     ).with_columns(
         (pl.col("team_games_left") * pl.col("availability")).alias("ros_games")
-    )
+    ).drop("_avail_prior")
 
     # Bayesian-ish update: preseason rate as prior, this season's games as data.
     k = config.prior_games

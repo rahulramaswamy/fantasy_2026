@@ -242,7 +242,7 @@ def build_ros_board(
     season = season or league.season
     board = board if board is not None else load_board()
     engine = ScoringEngine(league)
-    weekly = nflverse.weekly_stats([season])
+    weekly = nflverse.weekly_stats_if_available([season])
     schedule = nflverse.schedules([season])
     return rest_of_season(
         board, weekly, schedule, engine, current_week, season, config or ROSConfig()

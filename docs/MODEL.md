@@ -198,9 +198,16 @@ ros_ppg = (points_this_season + k x preseason_ppg) / (games_played + k)
 **Availability** is modelled separately, and this mattered more than the rate:
 
 ```
-availability = (games_played + 2 x 0.9) / (team_games_played + 2)
+availability = (games_played + 2 x prior_rate) / (team_games_played + 2)
 ros_games    = team_games_remaining x availability
 ```
+
+where `prior_rate` is the player's *own* projected durability
+(`proj_games / 17`), not a league-wide constant. That choice makes the whole
+thing degrade cleanly: with zero games played the availability term collapses to
+the preseason durability and rest-of-season reduces exactly to the preseason
+projection, so `ff board ros` is well-defined before week 1. It also measured
+better than a flat prior at every week (wk 3: 0.729 vs 0.714).
 
 Validation caught the bug that motivated it — the first version projected players
 who had missed *every* game as though they'd play every remaining one. Missing
@@ -210,10 +217,10 @@ time is the strongest single predictor of missing more.
 
 | From week | ROS model | Season-to-date only | Preseason only |
 |---|---|---|---|
-| 3 | **0.714** | 0.714 | 0.536 |
-| 6 | **0.744** | 0.742 | 0.525 |
-| 9 | **0.742** | 0.734 | 0.521 |
-| 12 | **0.746** | 0.729 | 0.543 |
+| 3 | **0.729** | 0.714 | 0.536 |
+| 6 | **0.751** | 0.742 | 0.525 |
+| 9 | **0.745** | 0.734 | 0.521 |
+| 12 | **0.749** | 0.729 | 0.543 |
 
 Preseason projections decay badly (0.536 → 0.543 while ROS climbs to 0.746),
 which is precisely why in-season decisions must not use them. **Use `ros_points`
