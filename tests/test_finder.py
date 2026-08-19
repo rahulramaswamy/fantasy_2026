@@ -163,3 +163,55 @@ def test_out_of_range_draft_slot_yields_no_picks():
     good = _state(5)
     assert good.slot_is_valid
     assert good.my_pick_numbers()[:3] == [5, 16, 25]
+
+
+def test_candidate_is_excluded_from_his_own_opportunity_cost():
+    """You cannot both draft a player now and find him available later.
+
+    Leaving the candidate in the pool inflates his baseline by his own expected
+    contribution, which is largest for the players most likely to survive.
+    """
+    from ff2026.draft.agent import expected_best_available
+
+    pool = pl.DataFrame({
+        "sleeper_id": ["a", "b", "c"],
+        "vorp": [100.0, 80.0, 60.0],
+        "adp": [40.0, 41.0, 42.0],     # all very likely to last to pick 10
+        "adp_stdev": [5.0, 5.0, 5.0],
+    })
+    with_a = expected_best_available(pool, pick=10)
+    without_a = expected_best_available(pool, pick=10, exclude_id="a")
+    assert without_a < with_a, "removing the best survivor must lower the baseline"
+
+
+def test_excluding_the_only_player_gives_zero_baseline():
+    from ff2026.draft.agent import expected_best_available
+
+    pool = pl.DataFrame({"sleeper_id": ["a"], "vorp": [100.0],
+                         "adp": [40.0], "adp_stdev": [5.0]})
+    assert expected_best_available(pool, pick=10, exclude_id="a") == 0.0
+
+
+def test_self_exclusion_does_not_reorder_within_a_position():
+    """Score must still rank a position the same way VORP does.
+
+    Self-exclusion gives each player a slightly different baseline, so it is
+    worth pinning that it does not accidentally shuffle a position's order.
+    """
+    from ff2026.config import LeagueConfig
+    from ff2026.draft.agent import recommend
+
+    board = pl.DataFrame({
+        "sleeper_id": [f"r{i}" for i in range(5)],
+        "name": [f"RB{i}" for i in range(5)],
+        "position": ["RB"] * 5,
+        "vorp": [100.0, 90.0, 80.0, 70.0, 60.0],
+        "proj_points": [250.0, 240.0, 230.0, 220.0, 210.0],
+        "replacement_points": [150.0] * 5,
+        "adp": [5.0, 8.0, 12.0, 18.0, 25.0],
+        "adp_stdev": [4.0] * 5,
+    })
+    league = LeagueConfig(teams=10, roster_positions=["RB", "RB", "BN"],
+                          scoring_settings={"rec": 1.0})
+    out = recommend(board, league, {}, current_pick=3, next_pick=14, top_n=5)
+    assert out["name"].to_list() == ["RB0", "RB1", "RB2", "RB3", "RB4"]
