@@ -165,53 +165,33 @@ def test_out_of_range_draft_slot_yields_no_picks():
     assert good.my_pick_numbers()[:3] == [5, 16, 25]
 
 
-def test_candidate_is_excluded_from_his_own_opportunity_cost():
-    """You cannot both draft a player now and find him available later.
+def test_likely_survivor_scores_near_zero_for_taking_him_early():
+    """A player almost certain to last must not be recommended early.
 
-    Leaving the candidate in the pool inflates his baseline by his own expected
-    contribution, which is largest for the players most likely to survive.
-    """
-    from ff2026.draft.agent import expected_best_available
+    If a quarterback is ~98% to survive until your next pick, passing on him
+    costs about 2% of his value, so his pick score should be near zero.
 
-    pool = pl.DataFrame({
-        "sleeper_id": ["a", "b", "c"],
-        "vorp": [100.0, 80.0, 60.0],
-        "adp": [40.0, 41.0, 42.0],     # all very likely to last to pick 10
-        "adp_stdev": [5.0, 5.0, 5.0],
-    })
-    with_a = expected_best_available(pool, pick=10)
-    without_a = expected_best_available(pool, pick=10, exclude_id="a")
-    assert without_a < with_a, "removing the best survivor must lower the baseline"
-
-
-def test_excluding_the_only_player_gives_zero_baseline():
-    from ff2026.draft.agent import expected_best_available
-
-    pool = pl.DataFrame({"sleeper_id": ["a"], "vorp": [100.0],
-                         "adp": [40.0], "adp_stdev": [5.0]})
-    assert expected_best_available(pool, pick=10, exclude_id="a") == 0.0
-
-
-def test_self_exclusion_does_not_reorder_within_a_position():
-    """Score must still rank a position the same way VORP does.
-
-    Self-exclusion gives each player a slightly different baseline, so it is
-    worth pinning that it does not accidentally shuffle a position's order.
+    This pins why the candidate stays in his own opportunity-cost pool. The
+    baseline is the value of *not* drafting him, and in that world he is still
+    on the board. Removing him scores him as though he would vanish, which
+    recommends spending a premium pick on a player you would get for free.
     """
     from ff2026.config import LeagueConfig
     from ff2026.draft.agent import recommend
 
     board = pl.DataFrame({
-        "sleeper_id": [f"r{i}" for i in range(5)],
-        "name": [f"RB{i}" for i in range(5)],
-        "position": ["RB"] * 5,
-        "vorp": [100.0, 90.0, 80.0, 70.0, 60.0],
-        "proj_points": [250.0, 240.0, 230.0, 220.0, 210.0],
-        "replacement_points": [150.0] * 5,
-        "adp": [5.0, 8.0, 12.0, 18.0, 25.0],
-        "adp_stdev": [4.0] * 5,
+        "sleeper_id": ["qb1", "qb2", "rb1"],
+        "name": ["Safe QB", "Other QB", "Scarce RB"],
+        "position": ["QB", "QB", "RB"],
+        "vorp": [76.0, 30.0, 70.0],
+        "proj_points": [350.0, 300.0, 250.0],
+        "replacement_points": [274.0, 274.0, 150.0],
+        "adp": [31.4, 60.0, 4.0],
+        "adp_stdev": [11.0, 12.0, 3.0],
     })
-    league = LeagueConfig(teams=10, roster_positions=["RB", "RB", "BN"],
+    league = LeagueConfig(teams=10, roster_positions=["QB", "RB", "BN"],
                           scoring_settings={"rec": 1.0})
-    out = recommend(board, league, {}, current_pick=3, next_pick=14, top_n=5)
-    assert out["name"].to_list() == ["RB0", "RB1", "RB2", "RB3", "RB4"]
+    out = recommend(board, league, {}, current_pick=5, next_pick=16, top_n=3)
+    scores = dict(zip(out["name"].to_list(), out["pick_score"].to_list(), strict=False))
+    assert scores["Safe QB"] < 10, "a near-certain survivor must not score high"
+    assert scores["Scarce RB"] > scores["Safe QB"], "scarcity must outrank safety"

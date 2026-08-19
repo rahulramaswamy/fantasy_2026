@@ -66,12 +66,7 @@ def survival_probability(adp: float | None, adp_sd: float | None, pick: int,
 
 
 def expected_best_available(
-    pool: pl.DataFrame,
-    pick: int,
-    value_col: str = "vorp",
-    default_sd: float = 12.0,
-    exclude_id: str | None = None,
-    id_col: str = "sleeper_id",
+    pool: pl.DataFrame, pick: int, value_col: str = "vorp", default_sd: float = 12.0
 ) -> float:
     """Expected value of the best player left in `pool` at pick number `pick`.
 
@@ -79,22 +74,18 @@ def expected_best_available(
     everyone ahead of him does not. Assumes independence across players, which
     slightly understates the tail -- real drafts have positional runs.
 
-    `exclude_id` drops one player from the pool. When this is used as the
-    opportunity cost of drafting someone, he must not appear in the set of
-    players still available afterwards: you cannot both take him now and find
-    him there later. Leaving him in inflates the baseline by his own expected
-    contribution, which is largest for exactly the players most likely to
-    survive -- so the error was biggest where it mattered most.
+    The candidate being scored MUST stay in this pool. It is tempting to remove
+    him ("you cannot draft him now and also find him later"), but the baseline
+    represents the world in which you did *not* draft him -- and in that world
+    he is still on the board. Removing him inflates the score of exactly the
+    players who least need drafting now: a quarterback who is 98% to survive
+    until your next pick should score ~0 for taking him early, because passing
+    costs you almost nothing. Excluding him instead scores him as though he
+    would vanish, which recommends spending a premium pick on a player you
+    would get for free.
     """
     if pool.is_empty():
         return 0.0
-
-    if exclude_id is not None and id_col in pool.columns:
-        pool = pool.filter(
-            pl.col(id_col).is_null() | (pl.col(id_col) != exclude_id)
-        )
-        if pool.is_empty():
-            return 0.0
 
     ranked = pool.sort(value_col, descending=True)
     expected = 0.0
@@ -171,32 +162,22 @@ def recommend(
     need = positional_need(roster, league, config)
 
     # What each position is expected to offer at my next turn.
-    id_col = "sleeper_id" if "sleeper_id" in available.columns else "gsis_id"
-
     if next_pick is None:
         # Final pick of the draft: nothing to wait for, so cost is zero.
-        baselines = [0.0] * available.height
+        vona_by_pos = dict.fromkeys(PROJECTABLE, 0.0)
     else:
-        pools = {
-            pos: available.filter(pl.col("position") == pos) for pos in PROJECTABLE
-        }
-        # Each player's opportunity cost excludes himself: taking him now means
-        # he is not among the players still on the board at your next pick.
-        baselines = [
-            expected_best_available(
-                pools.get(row["position"], available.head(0)),
+        vona_by_pos = {
+            pos: expected_best_available(
+                available.filter(pl.col("position") == pos),
                 next_pick,
                 default_sd=config.default_adp_sd,
-                exclude_id=row.get(id_col),
-                id_col=id_col,
             )
-            if row["position"] in pools
-            else 0.0
-            for row in available.select(["position", id_col]).to_dicts()
-        ]
+            for pos in PROJECTABLE
+        }
 
     df = available.with_columns(
-        pl.Series("vona_baseline", baselines, dtype=pl.Float64),
+        pl.col("position").replace_strict(vona_by_pos, default=0.0)
+        .cast(pl.Float64).alias("vona_baseline"),
         pl.col("position").replace_strict(need, default=1.0)
         .cast(pl.Float64).alias("need_mult"),
     )
