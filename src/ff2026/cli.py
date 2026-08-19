@@ -596,6 +596,15 @@ def _render_draft(state: DraftState, board: pl.DataFrame, cfg: LeagueConfig,
     if state.is_complete:
         return
 
+    if nxt is None:
+        console.print(
+            "[yellow]Your next pick isn't known yet[/yellow] -- Sleeper assigns "
+            "draft slots when the draft starts, so there is no pick number to "
+            "measure against.\n[dim]Until then P(lasts) shows '-' and ranking "
+            "falls back to raw value over replacement, with no timing "
+            "adjustment. Pass --slot N to compute it now.[/dim]"
+        )
+
     recs = recommend(
         available, cfg, counts, current or state.next_pick_overall, nxt,
         agent_cfg, top_n=top_n,

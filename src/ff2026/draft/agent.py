@@ -204,7 +204,10 @@ def recommend(
             .alias("survives_to_next")
         )
     else:
-        df = df.with_columns(pl.lit(0.0).alias("survives_to_next"))
+        # Null, not zero. Zero means "certainly gone"; this is "unknown", which
+        # is what we have before draft slots are assigned. Rendering unknown as
+        # 0% tells the drafter the exact opposite of the truth.
+        df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("survives_to_next"))
 
     return df.sort("pick_score", descending=True).head(top_n)
 

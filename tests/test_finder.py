@@ -120,3 +120,24 @@ def test_ratio_of_zero_allows_lopsided_trades():
     ideas = find_trades(mine, {"rival": theirs}, players, _league(),
                         FinderConfig(min_my_gain=1.0, min_their_gain_ratio=0.0))
     assert max(i.my_gain for i in ideas) > 100
+
+
+def test_unknown_next_pick_is_null_not_zero():
+    """Regression: before slots are assigned there is no next pick.
+
+    Reporting 0% survival there tells the drafter a player is certainly gone,
+    which is the opposite of the truth (we simply don't know).
+    """
+    from ff2026.config import LeagueConfig
+    from ff2026.draft.agent import recommend
+
+    board = pl.DataFrame({
+        "sleeper_id": ["a", "b"], "name": ["A", "B"], "position": ["RB", "WR"],
+        "vorp": [50.0, 40.0], "proj_points": [200.0, 190.0],
+        "replacement_points": [150.0, 150.0], "adp": [10.0, 20.0],
+        "adp_stdev": [5.0, 5.0],
+    })
+    league = LeagueConfig(teams=10, roster_positions=["RB", "WR", "BN"],
+                          scoring_settings={"rec": 1.0})
+    out = recommend(board, league, {}, current_pick=5, next_pick=None)
+    assert out["survives_to_next"].null_count() == out.height
