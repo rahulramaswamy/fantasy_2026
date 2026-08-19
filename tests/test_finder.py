@@ -141,3 +141,25 @@ def test_unknown_next_pick_is_null_not_zero():
                           scoring_settings={"rec": 1.0})
     out = recommend(board, league, {}, current_pick=5, next_pick=None)
     assert out["survives_to_next"].null_count() == out.height
+
+
+def test_out_of_range_draft_slot_yields_no_picks():
+    """Regression: an impossible slot silently produced nonsense pick numbers.
+
+    Slot 16 in a 10-team draft mapped to [16, 5, 36, 25, ...] -- descending
+    within a round -- and slot 0 or negative produced negative pick numbers.
+    Those fed survival probabilities that looked plausible and meant nothing.
+    """
+    from ff2026.draft.board import DraftState
+
+    def _state(slot):
+        return DraftState(draft_id="x", draft_type="snake", teams=10, rounds=15,
+                          status="pre_draft", my_slot=slot)
+
+    for bad in (16, 0, -3, 11):
+        assert not _state(bad).slot_is_valid
+        assert _state(bad).my_pick_numbers() == []
+
+    good = _state(5)
+    assert good.slot_is_valid
+    assert good.my_pick_numbers()[:3] == [5, 16, 25]

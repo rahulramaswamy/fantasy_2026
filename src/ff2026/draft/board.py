@@ -72,9 +72,23 @@ class DraftState:
             return (rnd - 1) * self.teams + (self.teams - slot + 1)
         return (rnd - 1) * self.teams + slot
 
+    @property
+    def slot_is_valid(self) -> bool:
+        """Is `my_slot` a real position in this draft?
+
+        Snake ordering maps an out-of-range slot to nonsense -- slot 16 in a
+        10-team draft yields picks [16, 5, 36, 25, ...], descending within a
+        round, and a slot of 0 or less produces negative pick numbers. Those
+        then feed survival probabilities and recommendations that look
+        plausible and are meaningless, so the range is checked rather than
+        assumed.
+        """
+        return self.my_slot is not None and 1 <= self.my_slot <= self.teams
+
     def my_pick_numbers(self) -> list[int]:
-        if self.my_slot is None:
+        if not self.slot_is_valid:
             return []
+        assert self.my_slot is not None  # narrowed by slot_is_valid
         return [self.pick_number(self.my_slot, r) for r in range(1, self.rounds + 1)]
 
     def my_upcoming_picks(self) -> list[int]:

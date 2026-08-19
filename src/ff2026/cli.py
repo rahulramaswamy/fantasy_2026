@@ -703,6 +703,12 @@ def draft_recommend(
         draft = client.draft(did)
         picks = client.draft_picks(did)
     state = DraftState.from_sleeper(draft or {}, picks, my_user_id=user_id, my_slot=slot)
+    if state.my_slot is not None and not state.slot_is_valid:
+        console.print(
+            f"[red]Slot {state.my_slot} does not exist in a {state.teams}-team "
+            f"draft.[/red] Use a number from 1 to {state.teams}."
+        )
+        raise typer.Exit(1)
     _render_draft(state, board, cfg, AgentConfig(), top_n)
 
 

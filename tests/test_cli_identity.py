@@ -27,10 +27,24 @@ class StubClient:
         return self.KNOWN.get(username_or_id)
 
 
+# Settings reads .env and the process environment, so a developer's real
+# Sleeper credentials would otherwise leak into these tests -- and a test for
+# "no identity configured" would pass or fail depending on whose machine it ran
+# on. Both sources are disabled so the fixture is the only input.
+IDENTITY_ENV_VARS = (
+    "SLEEPER_USERNAME", "SLEEPER_USER_ID", "SLEEPER_LEAGUE_ID", "SLEEPER_DRAFT_ID",
+)
+
+
 @pytest.fixture
 def settings(monkeypatch):
+    for var in IDENTITY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
     def _set(**kwargs):
-        monkeypatch.setattr(cli, "get_settings", lambda: Settings(**kwargs))
+        monkeypatch.setattr(
+            cli, "get_settings", lambda: Settings(_env_file=None, **kwargs)
+        )
     return _set
 
 
