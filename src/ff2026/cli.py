@@ -28,6 +28,15 @@ from .model.benchmark import summarize as bench_summarize
 from .model.evaluate import backtest, coverage, summarize
 from .model.projections import ProjectionConfig, fit_age_curve
 from .power import power_table, read_the_table, team_strengths
+from .roster.lineup import flags, set_lineup, weekly_values
+from .roster.waivers import (
+    WaiverConfig,
+    find_moves,
+    free_agents,
+    marginal_values,
+    rostered_in_league,
+    trending_counts,
+)
 from .scoring import ScoringEngine
 from .trades.evaluate import evaluate_trade
 from .trades.finder import FinderConfig, find_trades
@@ -42,6 +51,8 @@ model_app = typer.Typer(help="Model diagnostics and backtests.", no_args_is_help
 draft_app = typer.Typer(help="Live draft assistance.", no_args_is_help=True)
 trade_app = typer.Typer(help="Trade evaluation.", no_args_is_help=True)
 sleeper_app = typer.Typer(help="Raw Sleeper API helpers.", no_args_is_help=True)
+roster_app = typer.Typer(help="Your roster and this week's lineup.", no_args_is_help=True)
+waiver_app = typer.Typer(help="Waiver wire: who to add, who to drop.", no_args_is_help=True)
 
 app.add_typer(league_app, name="league")
 app.add_typer(data_app, name="data")
@@ -50,6 +61,8 @@ app.add_typer(model_app, name="model")
 app.add_typer(draft_app, name="draft")
 app.add_typer(trade_app, name="trade")
 app.add_typer(sleeper_app, name="sleeper")
+app.add_typer(roster_app, name="roster")
+app.add_typer(waiver_app, name="waiver")
 
 console = Console()
 
@@ -109,11 +122,28 @@ def _resolve_league_id(league_id: str | None) -> str:
 
 
 def _current_week(default: int | None = None) -> int:
+    """The regular-season week we are in, for rest-of-season maths.
+
+    Sleeper's `week` counts preseason weeks too (`season_type: "pre"`, week 2
+    in mid-August), and taking that literally would tell the model two
+    regular-season games have been played and everyone missed them. Before the
+    regular season the answer is week 0: nothing has happened yet.
+    """
     if default is not None:
         return default
     with SleeperClient() as client:
         state = client.state()
-    return int(state.get("week") or 1)
+    return regular_season_week(state)
+
+
+def regular_season_week(state: dict) -> int:
+    season_type = str(state.get("season_type") or "regular")
+    week = int(state.get("week") or 1)
+    if season_type == "pre":
+        return 0
+    if season_type == "post":
+        return 18
+    return week
 
 
 def _ros_board(league_cfg, week: int | None, season: int | None):
@@ -988,6 +1018,298 @@ def league_power(
         console.print("\n[bold]What this means:[/bold]")
         for note in notes:
             console.print(f"  - {note}")
+
+
+# --------------------------------------------------------------- in-season
+
+
+def _status_str(row: dict) -> str:
+    text = flags(row)
+    if not text:
+        return ""
+    color = "red" if ("BYE" in text or any(
+        s in text for s in ("IR", "Out", "PUP", "Sus", "Doubtful", "NA"))) else "yellow"
+    return f"[{color}]{text}[/]"
+
+
+def _season_context(cfg: LeagueConfig, league_id: str | None, username: str | None,
+                    week: int | None, season: int | None):
+    """Everything an in-season command needs: ROS board, week, my roster, league."""
+    lid = _resolve_league_id(league_id)
+    with console.status("Projecting rest of season..."):
+        board, wk = _ros_board(cfg, week, season)
+    my_ids, rosters, users = _my_roster_ids(lid, username)
+    id_col = "sleeper_id" if "sleeper_id" in board.columns else "gsis_id"
+    my_roster = board.filter(pl.col(id_col).is_in(my_ids))
+    missing = [i for i in my_ids if i not in set(my_roster[id_col].to_list())]
+    return board, wk, my_roster, missing, rosters, users, lid
+
+
+def _weekly_board(cfg: LeagueConfig, board: pl.DataFrame, wk: int, season: int | None):
+    """Board with `week_points` attached, using expert weekly numbers if fresh."""
+    from .data import expert as expert_mod
+    from .data import nflverse
+
+    season = season or cfg.season
+    schedule = nflverse.schedules([season])
+    expert = None
+    try:
+        expert = expert_mod.weekly_ecr(ppr=cfg.ppr)
+    except Exception as exc:  # noqa: BLE001 - optional signal
+        console.print(f"[dim]Weekly expert feed unavailable ({type(exc).__name__}).[/dim]")
+    weekly, used_expert = weekly_values(board, wk, schedule, season, expert)
+    return weekly, used_expert
+
+
+def _roster_table(df: pl.DataFrame, title: str, value_cols: list[tuple[str, str, int]],
+                  slot_col: str | None = None) -> Table:
+    table = Table(title=title, header_style="bold")
+    cols = ([("Slot", "left")] if slot_col else []) + [
+        ("Player", "left"), ("Pos", "left"), ("Tm", "left")
+    ] + [(label, "right") for label, _, _ in value_cols] + [("Status", "left")]
+    for label, justify in cols:
+        table.add_column(label, justify=justify)
+    for row in df.iter_rows(named=True):
+        pos = row.get("position") or "?"
+        cells = ([str(row.get(slot_col) or "")] if slot_col else []) + [
+            str(row.get("name") or "?"),
+            f"[{POS_COLORS.get(pos, 'white')}]{pos}[/]",
+            str(row.get("team") or "-"),
+        ] + [_fmt(row.get(col), digits) for _, col, digits in value_cols] + [
+            _status_str(row)
+        ]
+        table.add_row(*cells)
+    return table
+
+
+@roster_app.command("show")
+def roster_show(
+    league_id: str | None = typer.Option(None, "--league-id"),
+    username: str | None = typer.Option(None, "--username"),
+    week: int | None = typer.Option(None, "--week"),
+    season: int | None = typer.Option(None, "--season"),
+    config: str | None = typer.Option(None, "--config"),
+) -> None:
+    """Your roster, with rest-of-season value, injury designations and drop order."""
+    cfg = _load_league(config)
+    board, wk, my_roster, missing, _, _, _ = _season_context(
+        cfg, league_id, username, week, season
+    )
+    if my_roster.is_empty():
+        console.print("[yellow]Your roster is empty (or nobody on it is projected).[/yellow]")
+        raise typer.Exit(0)
+
+    weekly, _ = _weekly_board(cfg, my_roster, wk, season)
+    ranked = marginal_values(weekly, cfg, "ros_points").sort(
+        ["marginal", "ros_points"], descending=[True, True]
+    )
+    console.print(_roster_table(
+        ranked, f"Your roster (week {wk})",
+        [("ROS pts", "ros_points", 0), ("ROS ppg", "ros_ppg", 1),
+         ("Gm left", "ros_games", 1), ("Lineup +", "marginal", 0)],
+    ))
+    console.print(
+        "[dim]Lineup + = rest-of-season points your starting lineup loses without "
+        "him. Zero means bench; the lowest ROS pts among the zeroes is your "
+        "natural drop.[/dim]"
+    )
+    if missing:
+        console.print(
+            f"[dim]{len(missing)} rostered player(s) are not projected "
+            "(K/DEF, or unmatched ids).[/dim]"
+        )
+
+
+@roster_app.command("lineup")
+def roster_lineup(
+    league_id: str | None = typer.Option(None, "--league-id"),
+    username: str | None = typer.Option(None, "--username"),
+    week: int | None = typer.Option(None, "--week"),
+    season: int | None = typer.Option(None, "--season"),
+    config: str | None = typer.Option(None, "--config"),
+) -> None:
+    """Who to start this week, accounting for byes, injuries and expert weekly projections."""
+    cfg = _load_league(config)
+    _, wk, my_roster, missing, _, _, _ = _season_context(
+        cfg, league_id, username, week, season
+    )
+    if my_roster.is_empty():
+        console.print("[yellow]Your roster is empty (or nobody on it is projected).[/yellow]")
+        raise typer.Exit(0)
+
+    weekly, used_expert = _weekly_board(cfg, my_roster, wk, season)
+    lineup = set_lineup(weekly, cfg, "week_points")
+
+    value_cols = [("Week", "week_points", 1)]
+    if used_expert:
+        value_cols.append(("Expert", "week_pts", 1))
+    value_cols.append(("ROS ppg", "ros_ppg", 1))
+    if "week_opp" in weekly.columns:
+        value_cols.insert(1, ("Opp", "week_opp", 0))
+
+    console.print(_roster_table(
+        lineup.starters, f"Start -- week {wk} ({lineup.points:.0f} projected)",
+        value_cols, slot_col="slot",
+    ))
+    if not lineup.bench.is_empty():
+        console.print(_roster_table(lineup.bench, "Sit", value_cols))
+
+    if used_expert:
+        console.print(
+            "[dim]Week = 75% FantasyPros weekly consensus + 25% own rate, "
+            "zeroed for byes and Out/IR.[/dim]"
+        )
+    else:
+        console.print(
+            "[dim]Week = own scoring rate, zeroed for byes and Out/IR; "
+            "no fresh expert weekly projections yet.[/dim]"
+        )
+    if missing:
+        console.print("[dim]K/DEF are not projected; set those by hand.[/dim]")
+
+    notes = [r for r in lineup.starters.to_dicts() if r.get("week_note")] if \
+        "week_note" in lineup.starters.columns else []
+    for row in notes[:5]:
+        console.print(f"  [dim]{row['name']}: {str(row['week_note'])[:140]}[/dim]")
+
+
+@waiver_app.command("scan")
+def waiver_scan(
+    league_id: str | None = typer.Option(None, "--league-id"),
+    username: str | None = typer.Option(None, "--username"),
+    week: int | None = typer.Option(None, "--week"),
+    season: int | None = typer.Option(None, "--season"),
+    position: str | None = typer.Option(None, "--pos", help="Only look at one position."),
+    protect: str | None = typer.Option(
+        None, "--protect", help="Comma-separated names never to propose dropping."
+    ),
+    min_gain: float = typer.Option(1.0, "--min-gain", help="Minimum ROS points gained."),
+    top_n: int = typer.Option(15, "--top"),
+    config: str | None = typer.Option(None, "--config"),
+) -> None:
+    """Rank free agents by what adding them (and dropping someone) does to your lineup.
+
+    Valued on rest-of-season points. Shows Sleeper's 24h add count so you know
+    who will be contested on waivers.
+    """
+    cfg = _load_league(config)
+    board, wk, my_roster, missing, rosters, _, _ = _season_context(
+        cfg, league_id, username, week, season
+    )
+    id_col = "sleeper_id" if "sleeper_id" in board.columns else "gsis_id"
+
+    pool = free_agents(board, rostered_in_league(rosters))
+    if position:
+        pool = pool.filter(pl.col("position") == position.upper())
+
+    try:
+        with SleeperClient() as client:
+            trending = trending_counts(client.trending("add", limit=100))
+    except Exception:  # noqa: BLE001 - cosmetic
+        trending = {}
+
+    protect_ids: set[str] = set()
+    if protect:
+        for raw in protect.split(","):
+            name = raw.strip()
+            hit = my_roster.filter(pl.col("name").str.contains(f"(?i){name}"))
+            if hit.is_empty():
+                console.print(f"[yellow]'{name}' is not on your roster; ignoring.[/yellow]")
+            protect_ids.update(str(i) for i in hit[id_col].to_list())
+
+    # The roster is full if Sleeper's count (including K/DEF we cannot value)
+    # meets the league's roster size.
+    roster_full = (my_roster.height + len(missing)) >= cfg.roster_size
+
+    with console.status(f"Evaluating {pool.height} free agents..."):
+        moves = find_moves(
+            my_roster, pool, cfg,
+            WaiverConfig(min_gain=min_gain, top_n=top_n, protect=frozenset(protect_ids)),
+            trending=trending, roster_full=roster_full,
+        )
+
+    if not moves:
+        console.print(
+            f"[yellow]No add worth {min_gain:.0f}+ ROS points over what you have. "
+            "Try --min-gain 0 to see marginal ones.[/yellow]"
+        )
+        return
+
+    table = Table(title=f"Waiver targets (week {wk}, rest-of-season points)",
+                  header_style="bold")
+    for col, justify in (
+        ("#", "right"), ("Add", "left"), ("Pos", "left"), ("ROS", "right"),
+        ("Drop", "left"), ("ROS", "right"), ("Lineup +", "right"), ("Depth +", "right"),
+        ("Adds 24h", "right"), ("Status", "left"),
+    ):
+        table.add_column(col, justify=justify)
+    for i, m in enumerate(moves, 1):
+        lg = f"[green]+{m.lineup_gain:.0f}[/]" if m.lineup_gain >= 0.5 else "0"
+        table.add_row(
+            str(i), m.add_name, f"[{POS_COLORS.get(m.add_pos, 'white')}]{m.add_pos}[/]",
+            f"{m.add_ros:.0f}",
+            m.drop_name or "[dim](open spot)[/]", f"{m.drop_ros:.0f}" if m.drop_name else "-",
+            lg, f"{m.depth_gain:+.0f}",
+            f"[magenta]{m.trending_adds}[/]" if m.trending_adds else "",
+            f"[yellow]{m.add_status}[/]" if m.add_status else "",
+        )
+    console.print(table)
+    console.print(
+        "[dim]Lineup + = starting-lineup ROS points gained; Depth + = raw ROS points "
+        "swapped onto the bench. A high Adds-24h count means you will need "
+        "priority or FAAB.[/dim]"
+    )
+    if not roster_full:
+        console.print("[dim]You have an open roster spot -- no drop needed.[/dim]")
+
+
+@waiver_app.command("eval")
+def waiver_eval(
+    add: str = typer.Option(..., "--add", help="Comma-separated free agents to add."),
+    drop: str | None = typer.Option(None, "--drop", help="Comma-separated players to drop."),
+    league_id: str | None = typer.Option(None, "--league-id"),
+    username: str | None = typer.Option(None, "--username"),
+    week: int | None = typer.Option(None, "--week"),
+    season: int | None = typer.Option(None, "--season"),
+    config: str | None = typer.Option(None, "--config"),
+) -> None:
+    """Evaluate a specific add/drop by its effect on your rest-of-season lineup."""
+    cfg = _load_league(config)
+    board, wk, my_roster, _, _, _, _ = _season_context(
+        cfg, league_id, username, week, season
+    )
+    id_col = "sleeper_id" if "sleeper_id" in board.columns else "gsis_id"
+
+    def _resolve(names: str, frame: pl.DataFrame, what: str) -> list[str]:
+        ids: list[str] = []
+        for raw in names.split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            hit = frame.filter(pl.col("name").str.to_lowercase() == name.lower())
+            if hit.is_empty():
+                hit = frame.filter(pl.col("name").str.contains(f"(?i){name}"))
+            if hit.is_empty():
+                console.print(f"[red]No {what} matching '{name}'.[/red]")
+                raise typer.Exit(1)
+            ids.append(str(hit[id_col][0]))
+        return ids
+
+    add_ids = _resolve(add, board, "player")
+    drop_ids = _resolve(drop, my_roster, "player on your roster") if drop else []
+
+    result = evaluate_trade(my_roster, board, cfg, drop_ids, add_ids, value_col="ros_points")
+    delta = result["lineup_delta"]
+    names_in = ", ".join(result["receiving"]["name"].to_list())
+    names_out = ", ".join(result["sending"]["name"].to_list()) or "(nobody)"
+    console.print(Panel(
+        f"Add [bold]{names_in}[/bold], drop [bold]{names_out}[/bold]\n"
+        f"Starting lineup ROS: {result['lineup_before']} -> {result['lineup_after']}  "
+        f"([{'green' if delta >= 0 else 'red'}]{delta:+}[/])\n"
+        f"Roster spots: {result['depth_delta']:+}\n\n"
+        f"[bold]Verdict: {result['verdict']}[/bold]",
+        title=f"Waiver move (week {wk})",
+    ))
 
 
 @app.command("version")

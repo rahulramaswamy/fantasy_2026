@@ -25,14 +25,40 @@ switches the whole trade engine onto rest-of-season footing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import polars as pl
 
 from ..scoring import ScoringEngine
 
-# Sleeper injury designations that mean a player is unlikely to play soon.
-OUT_STATUSES = frozenset({"IR", "PUP", "Out", "Suspended", "NA", "Doubtful"})
+# Sleeper injury designations -> games the player should be expected to miss
+# from now, on top of his base availability rate. These are Sleeper's literal
+# strings (it abbreviates "Suspended" to "Sus", for instance).
+#
+#   * Out / Doubtful: this week's game, near-certainly.
+#   * Questionable: roughly one in four questionable players sits.
+#   * IR / PUP / NA (non-football injury): the league minimum stint is four
+#     games, and most stays run longer.
+#   * Sus: suspensions range from one game to a season; three is the median
+#     of the ones fantasy-relevant players actually serve.
+#
+# The status itself says nothing about *how long* after the minimum a player
+# is out; the availability rate (games played so far) carries that, because a
+# player who has missed half his games is likelier to keep missing them.
+EXPECTED_GAMES_MISSED: dict[str, float] = {
+    "Out": 1.0,
+    "Doubtful": 1.0,
+    "Questionable": 0.25,
+    "IR": 4.0,
+    "PUP": 4.0,
+    "NA": 4.0,
+    "Sus": 3.0,
+    "COV": 1.0,
+    "DNR": 4.0,
+}
+
+# Designations under which a player will not take the field this week.
+OUT_STATUSES = frozenset({"IR", "PUP", "Out", "Sus", "NA", "Doubtful", "COV", "DNR"})
 
 
 @dataclass
@@ -53,8 +79,8 @@ class ROSConfig:
     avail_prior_rate: float = 0.9
     # Games each team plays in a full regular season.
     games_per_team: int = 17
-    # Multiplier applied to players carrying an out-for-now designation.
-    injury_discount: float = 0.35
+    # Expected games missed per injury designation; see EXPECTED_GAMES_MISSED.
+    games_missed: dict[str, float] = field(default_factory=lambda: dict(EXPECTED_GAMES_MISSED))
     # Regular season length, used when a schedule is unavailable.
     default_total_weeks: int = 18
 
@@ -185,9 +211,24 @@ def rest_of_season(
             (pl.col("games_played") + ka * pl.col("_avail_prior"))
             / (pl.col("team_games_played") + ka)
         ).clip(0.0, 1.0).alias("availability")
-    ).with_columns(
-        (pl.col("team_games_left") * pl.col("availability")).alias("ros_games")
     ).drop("_avail_prior")
+
+    # Known absences: a current injury designation is information about the
+    # *next* games specifically, so it comes off the games remaining rather
+    # than off the scoring rate. A player on IR is not a worse player; he is a
+    # player with fewer games left.
+    if "injury_status" in df.columns:
+        missed = pl.col("injury_status").replace_strict(
+            config.games_missed, default=0.0, return_dtype=pl.Float64
+        )
+    else:
+        missed = pl.lit(0.0)
+    df = df.with_columns(missed.alias("exp_games_missed")).with_columns(
+        (
+            (pl.col("team_games_left") - pl.col("exp_games_missed")).clip(lower_bound=0.0)
+            * pl.col("availability")
+        ).alias("ros_games")
+    )
 
     # Bayesian-ish update: preseason rate as prior, this season's games as data.
     k = config.prior_games
@@ -197,16 +238,6 @@ def rest_of_season(
             / (pl.col("games_played") + k)
         ).alias("ros_ppg")
     )
-
-    # Players currently unavailable are discounted rather than dropped -- they
-    # still hold trade value, just less of it.
-    if "injury_status" in df.columns:
-        df = df.with_columns(
-            pl.when(pl.col("injury_status").is_in(list(OUT_STATUSES)))
-            .then(pl.col("ros_ppg") * config.injury_discount)
-            .otherwise(pl.col("ros_ppg"))
-            .alias("ros_ppg")
-        )
 
     return df.with_columns(
         (pl.col("ros_ppg") * pl.col("ros_games")).alias("ros_points")

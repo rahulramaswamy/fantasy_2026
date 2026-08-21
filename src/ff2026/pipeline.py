@@ -241,12 +241,59 @@ def build_ros_board(
     """
     season = season or league.season
     board = board if board is not None else load_board()
+    board = refresh_player_status(board)
     engine = ScoringEngine(league)
     weekly = nflverse.weekly_stats_if_available([season])
     schedule = nflverse.schedules([season])
     return rest_of_season(
         board, weekly, schedule, engine, current_week, season, config or ROSConfig()
     )
+
+
+def refresh_player_status(board: pl.DataFrame) -> pl.DataFrame:
+    """Overwrite the board's injury designation and team with Sleeper's current ones.
+
+    The saved board carries whatever `injury_status` Sleeper reported when
+    `ff board build` ran, which in a typical season is August. Every in-season
+    number must instead see this week's designations, or a player placed on IR
+    in October keeps projecting as healthy until someone rebuilds the board.
+    The crosswalk is cached for a day, so this costs one Sleeper call per day.
+    """
+    if "sleeper_id" not in board.columns:
+        return board
+    try:
+        crosswalk = build_crosswalk_table()
+    except Exception as exc:  # noqa: BLE001 - offline: keep what the board has
+        warnings.warn(
+            f"Could not refresh injury designations from Sleeper ({type(exc).__name__}); "
+            "using the ones saved with the board.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return board
+    if crosswalk.is_empty():
+        return board
+
+    fresh = crosswalk.select(
+        pl.col("sleeper_id").cast(pl.Utf8),
+        pl.col("injury_status").alias("_fresh_injury"),
+        pl.col("team").alias("_fresh_team"),
+    ).unique(subset=["sleeper_id"], keep="first")
+
+    out = board.with_columns(pl.col("sleeper_id").cast(pl.Utf8)).join(
+        fresh, on="sleeper_id", how="left"
+    )
+    # Only overwrite players the crosswalk knows; a missing row means no news.
+    out = out.with_columns(
+        pl.when(pl.col("_fresh_team").is_not_null())
+        .then(pl.col("_fresh_injury"))
+        .otherwise(pl.col("injury_status") if "injury_status" in out.columns else pl.lit(None))
+        .alias("injury_status"),
+        pl.coalesce([pl.col("_fresh_team"), pl.col("team")]).alias("team")
+        if "team" in out.columns
+        else pl.col("_fresh_team").alias("team"),
+    )
+    return out.drop(["_fresh_injury", "_fresh_team"])
 
 
 def league_rosters(league_id: str) -> tuple[list, list]:
