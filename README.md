@@ -83,10 +83,41 @@ Reproduce with `ff model benchmark`. Details in [docs/MODEL.md](docs/MODEL.md).
 ## In-season
 
 ```bash
+ff roster lineup                # who to start this week (byes, injuries, expert weekly numbers)
+ff waiver scan                  # best add/drop moves, ranked by what they do to your lineup
+ff waiver eval --add "Player" --drop "Player"   # check one specific move
+ff roster show                  # your roster: ROS value, designations, natural drop order
 ff board ros                    # rest-of-season projections (use these, not preseason)
 ff trade find --league-id <id>  # trades that help you AND your partner
 ff league power --league-id <id># who's actually good vs who's been lucky
 ```
+
+A weekly routine that takes about a minute:
+
+1. **Tuesday** — `ff waiver scan`. Every move is valued by what it does to
+   your *starting lineup* over the rest of the season, not by raw points, so a
+   fourth WR behind three better ones scores zero even if his number is big.
+   The `Adds 24h` column is Sleeper's trending feed: a high count means the
+   claim will be contested. `--protect "Name"` keeps someone off the drop list.
+2. **Sunday morning** — `ff roster lineup`. Byes and Out/IR players are zeroed;
+   Questionable players are haircut; during the season the number is 75%
+   FantasyPros' weekly consensus projection (which is re-ranked after Friday
+   injury reports) and 25% the player's own rate.
+
+### How injuries are handled
+
+- **Preseason**: through the expert-consensus blend. Experts see camp injuries,
+  suspensions and holdouts; the model does not.
+- **In-season**: every in-season command refreshes each player's current Sleeper
+  designation (Out, Doubtful, Questionable, IR, PUP, Sus) rather than using
+  the one saved when the board was built. Each designation is priced as
+  *expected games missed* — one for Out, four for IR/PUP, three for a
+  suspension — taken off the games remaining, while the scoring rate is left
+  alone: a player on IR is not a worse player, he is a player with fewer games
+  left. On top of that, a player who has already missed games is projected to
+  keep missing some (`availability`), because absence is the best predictor of
+  absence.
+- **K and DEF** are not projected, so `ff roster lineup` leaves them to you.
 
 ## Commands
 
@@ -107,6 +138,12 @@ ff board show --pos RB --tiers       # positional board with tier breaks
 ff draft live --username <you>       # live draft assistant (the main event)
 ff draft recommend                   # one-shot recommendation
 ff draft picks                       # what has been taken
+
+# In-season
+ff roster show                       # your roster, ROS value and drop order
+ff roster lineup                     # start/sit for the current week
+ff waiver scan [--pos RB] [--protect "Name"]   # ranked add/drop moves
+ff waiver eval --add "Player" [--drop "Player"]
 
 # Trades
 ff trade eval --send "Player A" --receive "Player B"
@@ -182,14 +219,18 @@ src/ff2026/
 │   ├── value.py     Replacement level, VORP, tiers
 │   ├── board.py     Live draft state and snake-order math
 │   └── agent.py     Pick recommendation
+├── roster/
+│   ├── lineup.py    This week's value: byes, injuries, expert weekly projections
+│   └── waivers.py   Free agents, add/drop search, drop order
 └── trades/
-    └── evaluate.py  Lineup-based trade evaluation
+    ├── evaluate.py  Lineup-based trade evaluation
+    └── finder.py    League-wide search for mutually beneficial trades
 ```
 
 ## Development
 
 ```bash
-make test        # 65 tests, no network required
+make test        # 111 tests, no network required
 make lint
 make typecheck
 ```

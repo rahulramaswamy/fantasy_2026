@@ -280,7 +280,12 @@ Stated plainly, because a projection you trust blindly is worse than none:
   year-over-year deltas (`ff model age-curve`) but not fitted from them —
   survivorship makes those deltas unreliable at the tail, since players who
   collapse get cut rather than playing a bad season.
-- **No injury-risk modelling** beyond historical games played.
+- **Injury handling is rule-based, not modelled.** Preseason, injury news
+  enters only through the expert blend. In-season, a current designation is
+  priced as a fixed number of expected games missed (`EXPECTED_GAMES_MISSED`
+  in `model/ros.py`) and past absence feeds an availability rate; there is no
+  per-injury severity model (body part, weeks since injury, practice status),
+  although the nflverse injury reports that would support one are cached.
 - **Survival probability assumes independence** across players, which slightly
   understates the tail.
 

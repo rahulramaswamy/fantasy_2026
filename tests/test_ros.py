@@ -162,3 +162,49 @@ def test_board_without_proj_games_still_works():
     out = rest_of_season(board, _empty_weekly(), _full_schedule(), _engine(), 0, 2026)
     assert out.height == 2
     assert out["availability"].null_count() == 0
+
+
+def _injury_board(statuses):
+    return pl.DataFrame({
+        "gsis_id": [f"p{i}" for i in range(len(statuses))],
+        "name": [f"P{i}" for i in range(len(statuses))],
+        "position": ["RB"] * len(statuses),
+        "team": ["AAA"] * len(statuses),
+        "proj_ppg": [10.0] * len(statuses),
+        "proj_points": [170.0] * len(statuses),
+        "proj_games": [17.0] * len(statuses),
+        "injury_status": statuses,
+    })
+
+
+def test_injury_designation_costs_games_not_rate():
+    """IR takes four games off the slate; Out takes one; healthy takes none.
+    The scoring rate is untouched -- an injured player is not a worse player."""
+    out = rest_of_season(
+        _injury_board([None, "Out", "IR"]), _empty_weekly(), _full_schedule(),
+        _engine(), 0, 2026,
+    )
+    rows = {r["gsis_id"]: r for r in out.to_dicts()}
+    assert rows["p0"]["ros_games"] == 17.0
+    assert rows["p1"]["ros_games"] == 16.0
+    assert rows["p2"]["ros_games"] == 13.0
+    assert rows["p0"]["ros_ppg"] == rows["p1"]["ros_ppg"] == rows["p2"]["ros_ppg"]
+    assert rows["p0"]["ros_points"] > rows["p1"]["ros_points"] > rows["p2"]["ros_points"]
+
+
+def test_sleeper_suspension_spelling_is_recognised():
+    """Sleeper abbreviates to 'Sus'; the old 'Suspended' check never matched."""
+    out = rest_of_season(
+        _injury_board(["Sus", None]), _empty_weekly(), _full_schedule(), _engine(), 0, 2026,
+    )
+    rows = {r["gsis_id"]: r for r in out.to_dicts()}
+    assert rows["p0"]["ros_games"] < rows["p1"]["ros_games"]
+
+
+def test_games_missed_never_goes_negative():
+    """An IR player with two games left has zero left, not minus two."""
+    out = rest_of_season(
+        _injury_board(["IR"]), _empty_weekly(), _full_schedule(), _engine(), 15, 2026,
+    )
+    assert out["ros_games"][0] == 0.0
+    assert out["ros_points"][0] == 0.0
