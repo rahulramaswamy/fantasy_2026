@@ -150,3 +150,76 @@ def current_ecr(
         if not filtered.is_empty():
             latest = filtered
     return _tidy(latest, load_player_ids(local_dir))
+
+
+# ----------------------------------------------------------------- in-season
+
+WEEKLY_POSITIONS = ("QB", "RB", "WR", "TE")
+
+
+def weekly_ecr(ppr: float = 1.0, local_dir: str | Path | None = None) -> pl.DataFrame:
+    """This week's expert rankings and projected points, keyed by gsis_id.
+
+    FantasyPros publishes weekly start/sit rankings per position, and the feed
+    carries each player's consensus projected points for the week (`r2p_pts`),
+    opponent, bye, and an editor's note. Crucially it is re-ranked after injury
+    news, so in-season it is the best single read on who will actually play and
+    how much. The feed only exists during the season; the caller must check
+    `scrape_date` before trusting it, because the last scrape of a finished
+    season sits there all offseason.
+
+    Returns: gsis_id, week_ecr, week_pts, week_opp, week_note, scrape_date.
+    """
+    local_dir = local_dir or default_local_dir()
+    raw = None
+    if local_dir:
+        for suffix in (".parquet", ".csv"):
+            path = Path(local_dir) / f"db_fpecr_week{suffix}"
+            if path.exists():
+                raw = (
+                    pl.read_parquet(path) if suffix == ".parquet"
+                    else pl.read_csv(path, infer_schema_length=None)
+                )
+                break
+    if raw is None:
+        import nflreadpy as nfl
+
+        raw = nfl.load_ff_rankings(type="week")
+
+    empty = pl.DataFrame(schema={
+        "gsis_id": pl.Utf8, "week_ecr": pl.Float64, "week_pts": pl.Float64,
+        "week_opp": pl.Utf8, "week_note": pl.Utf8, "scrape_date": pl.Utf8,
+    })
+    if raw.is_empty() or "fantasypros_id" not in raw.columns:
+        return empty
+
+    df = raw.filter(pl.col("pos").is_in(WEEKLY_POSITIONS))
+    # Prefer the pages matching the league's format; fall back to whatever the
+    # feed has rather than returning nothing.
+    if "page" in df.columns:
+        want_ppr = ppr >= 0.5
+        preferred = df.filter(
+            (pl.col("pos") == "QB")
+            | (pl.col("page").str.starts_with("ppr-") if want_ppr
+               else ~pl.col("page").str.contains("ppr"))
+        )
+        if not preferred.is_empty():
+            df = preferred
+
+    cols = [
+        pl.col("fantasypros_id").cast(pl.Utf8),
+        pl.col("ecr").cast(pl.Float64).alias("week_ecr"),
+        (pl.col("r2p_pts").cast(pl.Float64) if "r2p_pts" in df.columns
+         else pl.lit(None, dtype=pl.Float64)).alias("week_pts"),
+        (pl.col("player_opponent").cast(pl.Utf8) if "player_opponent" in df.columns
+         else pl.lit(None, dtype=pl.Utf8)).alias("week_opp"),
+        (pl.col("note").cast(pl.Utf8) if "note" in df.columns
+         else pl.lit(None, dtype=pl.Utf8)).alias("week_note"),
+        pl.col("scrape_date").cast(pl.Utf8),
+    ]
+    return (
+        df.select(cols)
+        .join(load_player_ids(local_dir), on="fantasypros_id", how="inner")
+        .drop("fantasypros_id")
+        .unique(subset=["gsis_id"], keep="first")
+    )
