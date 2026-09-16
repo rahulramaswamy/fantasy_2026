@@ -21,6 +21,8 @@ from .cache import TTL_DAY, TTL_HOUR, cached_json
 
 BASE_URL = "https://api.sleeper.app/v1"
 AVATAR_URL = "https://sleepercdn.com/avatars"
+# Absolute, so httpx ignores the /v1 base_url for it.
+PROJECTIONS_URL = "https://api.sleeper.app/projections/nfl"
 
 # Sleeper's documented ceiling is ~1000 calls/minute; stay well under it.
 MAX_CALLS_PER_MINUTE = 600
@@ -231,6 +233,28 @@ class SleeperClient:
             )
             or [],
             ttl=TTL_HOUR,
+        )
+
+    def projections(
+        self,
+        season: int,
+        week: int,
+        positions: tuple[str, ...] = ("QB", "RB", "WR", "TE"),
+        force: bool = False,
+    ) -> list[dict[str, Any]]:
+        """GET https://api.sleeper.app/projections/nfl/<season>/<week>
+
+        Not part of the documented v1 API (it sits outside /v1), but it is what
+        the Sleeper app shows. Each row carries a projected stat line keyed by
+        Sleeper scoring keys, so it can be scored under any league's rules.
+        Projections move with injury news, so the cache is short.
+        """
+        query = "&".join(["season_type=regular"] + [f"position[]={p}" for p in positions])
+        return cached_json(
+            f"sleeper_projections_{season}_{week}_{'_'.join(positions)}",
+            lambda: self._get(f"{PROJECTIONS_URL}/{season}/{week}?{query}") or [],
+            ttl=TTL_HOUR,
+            force=force,
         )
 
     # --------------------------------------------------------------- utilities

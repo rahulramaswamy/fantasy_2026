@@ -28,7 +28,7 @@ from .model.benchmark import summarize as bench_summarize
 from .model.evaluate import backtest, coverage, summarize
 from .model.projections import ProjectionConfig, fit_age_curve
 from .power import power_table, read_the_table, team_strengths
-from .roster.lineup import flags, set_lineup, weekly_values
+from .roster.lineup import flags, set_lineup, sleeper_week_points, weekly_values
 from .roster.waivers import (
     WaiverConfig,
     find_moves,
@@ -1047,7 +1047,7 @@ def _season_context(cfg: LeagueConfig, league_id: str | None, username: str | No
 
 
 def _weekly_board(cfg: LeagueConfig, board: pl.DataFrame, wk: int, season: int | None):
-    """Board with `week_points` attached, using expert weekly numbers if fresh."""
+    """Board with `week_points` attached, using outside weekly projections where available."""
     from .data import expert as expert_mod
     from .data import nflverse
 
@@ -1058,8 +1058,18 @@ def _weekly_board(cfg: LeagueConfig, board: pl.DataFrame, wk: int, season: int |
         expert = expert_mod.weekly_ecr(ppr=cfg.ppr)
     except Exception as exc:  # noqa: BLE001 - optional signal
         console.print(f"[dim]Weekly expert feed unavailable ({type(exc).__name__}).[/dim]")
-    weekly, used_expert = weekly_values(board, wk, schedule, season, expert)
-    return weekly, used_expert
+    sleeper = None
+    try:
+        with SleeperClient() as client:
+            sleeper = sleeper_week_points(
+                client.projections(season, wk), cfg.scoring_settings
+            )
+    except Exception as exc:  # noqa: BLE001 - optional signal
+        console.print(f"[dim]Sleeper projections unavailable ({type(exc).__name__}).[/dim]")
+    weekly, used_outside = weekly_values(
+        board, wk, schedule, season, expert, sleeper=sleeper
+    )
+    return weekly, used_outside
 
 
 def _roster_table(df: pl.DataFrame, title: str, value_cols: list[tuple[str, str, int]],
@@ -1138,12 +1148,16 @@ def roster_lineup(
         console.print("[yellow]Your roster is empty (or nobody on it is projected).[/yellow]")
         raise typer.Exit(0)
 
-    weekly, used_expert = _weekly_board(cfg, my_roster, wk, season)
+    weekly, used_outside = _weekly_board(cfg, my_roster, wk, season)
     lineup = set_lineup(weekly, cfg, "week_points")
 
+    has_fp = "week_pts" in weekly.columns
+    has_sleeper = "sleeper_pts" in weekly.columns
     value_cols = [("Week", "week_points", 1)]
-    if used_expert:
-        value_cols.append(("Expert", "week_pts", 1))
+    if has_fp:
+        value_cols.append(("FPros", "week_pts", 1))
+    if has_sleeper:
+        value_cols.append(("Sleeper", "sleeper_pts", 1))
     value_cols.append(("ROS ppg", "ros_ppg", 1))
     if "week_opp" in weekly.columns:
         value_cols.insert(1, ("Opp", "week_opp", 0))
@@ -1155,15 +1169,19 @@ def roster_lineup(
     if not lineup.bench.is_empty():
         console.print(_roster_table(lineup.bench, "Sit", value_cols))
 
-    if used_expert:
+    if used_outside:
+        sources = " and ".join(
+            name for name, ok in (("FantasyPros", has_fp), ("Sleeper", has_sleeper)) if ok
+        )
+        blend = "average of " + sources if has_fp and has_sleeper else sources
         console.print(
-            "[dim]Week = 75% FantasyPros weekly consensus + 25% own rate, "
-            "zeroed for byes and Out/IR.[/dim]"
+            f"[dim]Week = 75% {blend} weekly projection + 25% own rate, "
+            "zeroed for byes and Out/IR. Sleeper is scored with your league's rules.[/dim]"
         )
     else:
         console.print(
             "[dim]Week = own scoring rate, zeroed for byes and Out/IR; "
-            "no fresh expert weekly projections yet.[/dim]"
+            "no weekly projections available yet.[/dim]"
         )
     if missing:
         console.print("[dim]K/DEF are not projected; set those by hand.[/dim]")

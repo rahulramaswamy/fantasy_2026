@@ -8,9 +8,11 @@ rest-of-season number looks. So start/sit runs on a separate, one-week value:
   * the player's current scoring rate (`ros_ppg`, which already folds in this
     season's evidence),
   * zeroed if his team is on bye or he carries an Out-type designation,
-  * and, during the season, pulled toward the FantasyPros weekly consensus
-    projection where one exists -- the experts re-rank after Friday injury
-    reports, which is exactly the information a Sunday lineup needs.
+  * and, during the season, pulled toward outside weekly projections -- the
+    FantasyPros consensus and Sleeper's own projection, averaged where both
+    exist. Both are built for this week's opponent and re-rank after injury
+    news, which is exactly what a Sunday lineup needs and what a season-long
+    rate cannot see.
 
 The lineup itself is filled with the same most-constrained-first optimizer the
 trade evaluator uses, so a FLEX never steals a player a dedicated slot needed.
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 import polars as pl
 
@@ -81,6 +84,39 @@ def expert_is_fresh(
     return (today - scraped).days <= MAX_EXPERT_AGE_DAYS
 
 
+def sleeper_week_points(
+    rows: list[dict[str, Any]], scoring_settings: dict[str, float]
+) -> pl.DataFrame:
+    """Score Sleeper's projected stat lines under this league's rules.
+
+    Sleeper projects stats under its own scoring keys (`rec`, `rec_yd`,
+    `bonus_rec_te`, ...), the same keys a league's `scoring_settings` uses, so
+    the league score is a straight dot product -- no stat mapping to go wrong.
+
+    Returns: sleeper_id, sleeper_pts, sleeper_opp.
+    """
+    out = []
+    for row in rows:
+        stats = row.get("stats") or {}
+        pid = row.get("player_id")
+        if not pid or not stats:
+            continue
+        pts = sum(
+            float(stats[key]) * value
+            for key, value in scoring_settings.items()
+            if value and isinstance(stats.get(key), int | float)
+        )
+        out.append({
+            "sleeper_id": str(pid),
+            "sleeper_pts": round(pts, 2),
+            "sleeper_opp": row.get("opponent"),
+        })
+    schema = {"sleeper_id": pl.Utf8, "sleeper_pts": pl.Float64, "sleeper_opp": pl.Utf8}
+    if not out:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(out, schema=schema).unique(subset=["sleeper_id"], keep="first")
+
+
 def weekly_values(
     board: pl.DataFrame,
     week: int,
@@ -89,10 +125,16 @@ def weekly_values(
     expert: pl.DataFrame | None = None,
     expert_weight: float = DEFAULT_EXPERT_WEIGHT,
     today: date | None = None,
+    sleeper: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, bool]:
     """Attach `week_points`: what each player is worth in this one week.
 
-    Returns the frame and whether expert weekly projections were folded in.
+    `expert` is the FantasyPros weekly feed (gated on freshness); `sleeper` is
+    `sleeper_week_points` for this week, which is fresh by construction since
+    it is fetched for the week asked about. Where both exist they are averaged,
+    and that average takes `expert_weight` of the number.
+
+    Returns the frame and whether any outside weekly projection was folded in.
     """
     rate_col = "ros_ppg" if "ros_ppg" in board.columns else "proj_ppg"
     byes = teams_on_bye(schedule, week, season)
@@ -107,31 +149,41 @@ def weekly_values(
     )
     df = df.with_columns((pl.col(rate_col).fill_null(0.0) * plays).alias("_own_week"))
 
+    outside: list[str] = []
     fresh = expert_is_fresh(expert, season or 0, today) if season else False
     if fresh and expert is not None and "gsis_id" in df.columns:
         cols = [c for c in ("gsis_id", "week_pts", "week_opp", "week_note", "week_ecr")
                 if c in expert.columns]
         df = df.join(expert.select(cols), on="gsis_id", how="left")
         if "week_pts" in df.columns:
-            # Experts list a player on bye/out at 0 or not at all; either way the
-            # zero from our own side wins, so a stale non-zero cannot start him.
-            df = df.with_columns(
-                pl.when(pl.col("week_pts").is_not_null() & (pl.col("_own_week") > 0))
-                .then(
-                    expert_weight * pl.col("week_pts")
-                    + (1 - expert_weight) * pl.col("_own_week")
-                )
-                .otherwise(pl.col("_own_week"))
-                .alias("week_points")
-            )
-        else:
-            df = df.with_columns(pl.col("_own_week").alias("week_points"))
-            fresh = False
+            outside.append("week_pts")
+
+    if (sleeper is not None and not sleeper.is_empty()
+            and "sleeper_id" in df.columns and "sleeper_pts" in sleeper.columns):
+        cols = [c for c in ("sleeper_id", "sleeper_pts", "sleeper_opp") if c in sleeper.columns]
+        df = df.with_columns(pl.col("sleeper_id").cast(pl.Utf8)).join(
+            sleeper.select(cols).with_columns(pl.col("sleeper_id").cast(pl.Utf8)),
+            on="sleeper_id", how="left",
+        )
+        outside.append("sleeper_pts")
+        if "week_opp" not in df.columns and "sleeper_opp" in df.columns:
+            df = df.with_columns(pl.col("sleeper_opp").alias("week_opp"))
+
+    if outside:
+        # Nulls are skipped, so a player only one source covers gets that one.
+        consensus = pl.mean_horizontal([pl.col(c) for c in outside])
+        # Outside sources list a player on bye/out at 0 or not at all; either way
+        # the zero from our own side wins, so a stale non-zero cannot start him.
+        df = df.with_columns(
+            pl.when(consensus.is_not_null() & (pl.col("_own_week") > 0))
+            .then(expert_weight * consensus + (1 - expert_weight) * pl.col("_own_week"))
+            .otherwise(pl.col("_own_week"))
+            .alias("week_points")
+        )
     else:
         df = df.with_columns(pl.col("_own_week").alias("week_points"))
-        fresh = False
 
-    return df.drop("_own_week"), fresh
+    return df.drop("_own_week"), bool(outside)
 
 
 def set_lineup(
@@ -146,7 +198,8 @@ def set_lineup(
     bench = my_roster.filter(~pl.col(key).is_in(list(started))).sort(
         value_col, descending=True, nulls_last=True
     )
-    return WeeklyLineup(starters, bench, points, "week_pts" in my_roster.columns)
+    used = "week_pts" in my_roster.columns or "sleeper_pts" in my_roster.columns
+    return WeeklyLineup(starters, bench, points, used)
 
 
 def flags(row: dict) -> str:

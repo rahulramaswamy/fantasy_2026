@@ -5,6 +5,7 @@ import polars as pl
 from ff2026.roster.lineup import (
     expert_is_fresh,
     set_lineup,
+    sleeper_week_points,
     teams_on_bye,
     weekly_values,
 )
@@ -88,6 +89,42 @@ def test_expert_weekly_points_blend_in_when_fresh():
     assert abs(vals["RB1"] - (0.75 * 25 + 0.25 * 15)) < 1e-6
     # An Out player stays at zero even if the expert page has a number.
     assert vals["WR2"] == 0.0
+
+
+def test_sleeper_week_points_uses_league_scoring():
+    rows = [
+        {"player_id": "5", "opponent": "BBB",
+         "stats": {"rec": 5.0, "rec_yd": 60.0, "rec_td": 0.5, "pts_ppr": 99.0}},
+        {"player_id": "9", "stats": {}},
+    ]
+    df = sleeper_week_points(rows, {"rec": 0.5, "rec_yd": 0.1, "rec_td": 6.0})
+    assert df["sleeper_id"].to_list() == ["5"]
+    # Only scoring keys count; Sleeper's own pts_ppr is ignored.
+    assert df["sleeper_pts"][0] == 2.5 + 6.0 + 3.0
+    assert df["sleeper_opp"][0] == "BBB"
+
+
+def test_sleeper_projection_blends_alone_and_with_experts():
+    sleeper = pl.DataFrame({
+        "sleeper_id": ["2", "5", "6"], "sleeper_pts": [5.0, 20.0, 18.0],
+    })
+    df, used = weekly_values(_roster(), 1, _schedule(), 2026, sleeper=sleeper)
+    assert used
+    vals = dict(zip(df["name"].to_list(), df["week_points"].to_list(), strict=True))
+    assert abs(vals["RB1"] - (0.75 * 5 + 0.25 * 15)) < 1e-6
+    assert vals["QB1"] == 20.0  # not in Sleeper's feed: own rate only
+    assert vals["WR2"] == 0.0  # Out stays zero
+
+    expert = pl.DataFrame({
+        "gsis_id": ["g2", "g5"], "week_pts": [25.0, 16.0],
+        "scrape_date": ["2026-09-10", "2026-09-10"],
+    })
+    df, used = weekly_values(
+        _roster(), 1, _schedule(), 2026, expert, today=date(2026, 9, 12), sleeper=sleeper
+    )
+    vals = dict(zip(df["name"].to_list(), df["week_points"].to_list(), strict=True))
+    assert abs(vals["RB1"] - (0.75 * 15 + 0.25 * 15)) < 1e-6  # mean(25, 5) = 15
+    assert abs(vals["WR1"] - (0.75 * 18 + 0.25 * 16)) < 1e-6  # mean(16, 20) = 18
 
 
 def test_marginal_values_identify_bench(ppr_league):
